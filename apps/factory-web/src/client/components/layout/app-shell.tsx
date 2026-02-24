@@ -2,7 +2,8 @@ import { useMemo } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 
-import { listProjects } from "../../lib/api";
+import { getRun, listProjects } from "../../lib/api";
+import { pathForProjectSelection } from "../../lib/project-routing";
 import { cn } from "../../lib/utils";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 
@@ -22,12 +23,18 @@ function toTitleCase(value: string): string {
 export function AppShell() {
   const location = useLocation();
   const navigate = useNavigate();
-  const params = useParams();
+  const params = useParams<{ projectId?: string; runId?: string }>();
   const projectIdFromPath = params.projectId;
+  const runIdFromPath = params.runId;
 
   const projectsQuery = useQuery({
     queryKey: ["projects"],
     queryFn: listProjects
+  });
+  const runContextQuery = useQuery({
+    queryKey: ["run-context", runIdFromPath],
+    queryFn: () => getRun(runIdFromPath ?? ""),
+    enabled: Boolean(runIdFromPath)
   });
 
   const breadcrumbs = useMemo(() => {
@@ -55,7 +62,17 @@ export function AppShell() {
 
       if (part === "runs" && index + 1 < parts.length) {
         const runId = parts[index + 1] ?? "";
-        items.push({ href: "/projects", label: "Runs" });
+        const runProjectId = runContextQuery.data?.projectId;
+        const runProject = runProjectId
+          ? projectsQuery.data?.find((candidate) => candidate.id === runProjectId)
+          : undefined;
+        if (runProjectId) {
+          items.push({ href: "/projects", label: "Projects" });
+          items.push({ href: `/projects/${runProjectId}`, label: runProject?.name ?? "Project" });
+          items.push({ href: `/projects/${runProjectId}/runs`, label: "Runs" });
+        } else {
+          items.push({ href: "/projects", label: "Runs" });
+        }
         items.push({ href: `/runs/${runId}`, label: runId.slice(0, 8) });
         index += 1;
         cursor += `/${runId}`;
@@ -66,9 +83,29 @@ export function AppShell() {
     }
 
     return items;
-  }, [location.pathname, projectsQuery.data]);
+  }, [location.pathname, projectsQuery.data, runContextQuery.data?.projectId]);
 
-  const selectedProjectId = projectIdFromPath ?? projectsQuery.data?.[0]?.id;
+  const selectedProjectId = useMemo(() => {
+    if (projectIdFromPath) {
+      return projectIdFromPath;
+    }
+
+    if (runContextQuery.data?.projectId) {
+      return runContextQuery.data.projectId;
+    }
+
+    if (runIdFromPath && runContextQuery.isLoading) {
+      return undefined;
+    }
+
+    return projectsQuery.data?.[0]?.id;
+  }, [
+    projectIdFromPath,
+    projectsQuery.data,
+    runContextQuery.data?.projectId,
+    runContextQuery.isLoading,
+    runIdFromPath
+  ]);
 
   return (
     <div className="flex min-h-screen flex-col md:flex-row">
@@ -146,7 +183,7 @@ export function AppShell() {
                 if (!value) {
                   return;
                 }
-                navigate(`/projects/${value}`);
+                navigate(pathForProjectSelection(location.pathname, value));
               }}
             >
               <SelectTrigger className="md:w-72">
