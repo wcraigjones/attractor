@@ -63,14 +63,16 @@ Deploy stack to OrbStack Kubernetes:
 npm run k8s:deploy:local
 ```
 
+The deploy script installs Traefik, applies the factory ingress, and prints direct local Web/API URLs (no port-forward required).
+
 Provider API keys are not required to install or open the UI. The factory boots keyless and you add project-scoped provider keys later from the Web UI (`Project Secret` panel).
 
 ## Self-Bootstrap Run
 
-After API is reachable (port-forward or ingress), bootstrap the repo and queue a planning run:
+After API is reachable (use the `API URL` printed by `npm run k8s:deploy:local`), bootstrap the repo and queue a planning run:
 
 ```bash
-API_BASE_URL=http://localhost:8080 npm run bootstrap:self
+API_BASE_URL=http://<traefik-ip>/api npm run bootstrap:self
 ```
 
 Preferred: set provider credentials in the UI (`Project Secret` panel) after project bootstrap.
@@ -81,7 +83,7 @@ CLI fallback: set provider credentials for the project (required before runs can
 PROJECT_ID=<project-id> \
 PROVIDER=anthropic \
 ANTHROPIC_API_KEY=<key> \
-API_BASE_URL=http://localhost:8080 \
+API_BASE_URL=http://<traefik-ip>/api \
 npm run set:provider-secret
 ```
 
@@ -91,14 +93,14 @@ You can also bootstrap and set the provider secret in one command (CLI fallback)
 SET_PROVIDER_SECRET=true \
 MODEL_PROVIDER=anthropic \
 ANTHROPIC_API_KEY=<key> \
-API_BASE_URL=http://localhost:8080 \
+API_BASE_URL=http://<traefik-ip>/api \
 npm run bootstrap:self
 ```
 
 Queue an implementation run from the latest successful planning bundle:
 
 ```bash
-PROJECT_ID=<project-id> ATTRACTOR_ID=<attractor-id> API_BASE_URL=http://localhost:8080 npm run self:iterate
+PROJECT_ID=<project-id> ATTRACTOR_ID=<attractor-id> API_BASE_URL=http://<traefik-ip>/api npm run self:iterate
 ```
 
 Run the full self-factory loop (bootstrap, secret setup, planning, implementation, wait for completion):
@@ -106,7 +108,7 @@ Run the full self-factory loop (bootstrap, secret setup, planning, implementatio
 ```bash
 MODEL_PROVIDER=anthropic \
 ANTHROPIC_API_KEY=<key> \
-API_BASE_URL=http://localhost:8080 \
+API_BASE_URL=http://<traefik-ip>/api \
 npm run self:cycle
 ```
 

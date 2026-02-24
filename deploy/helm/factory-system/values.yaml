@@ -33,11 +33,15 @@ service:
   web:
     port: 3000
 
+web:
+  apiBaseUrl: /api
+
 ingress:
   enabled: true
   className: ""
-  hostApi: api.attractor.local
-  hostWeb: attractor.local
+  host: ""
+  webPathPrefix: /
+  apiPathPrefix: /api
 
 postgres:
   user: postgres

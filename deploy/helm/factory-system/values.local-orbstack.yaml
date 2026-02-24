@@ -1,9 +1,12 @@
 namespace: factory-system
+web:
+  apiBaseUrl: /api
 ingress:
   enabled: true
-  className: ""
-  hostApi: api.attractor.local
-  hostWeb: attractor.local
+  className: traefik
+  host: ""
+  webPathPrefix: /
+  apiPathPrefix: /api
 images:
   api:
     repository: ghcr.io/wcraigjones/attractor-factory-api

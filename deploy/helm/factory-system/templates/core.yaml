@@ -359,7 +359,7 @@ spec:
             - name: PORT
               value: {{ .Values.service.web.port | quote }}
             - name: API_BASE_URL
-              value: "http://factory-api.{{ include "factory.namespace" . }}.svc.cluster.local:{{ .Values.service.api.port }}"
+              value: {{ .Values.web.apiBaseUrl | quote }}
           resources:
             {{- toYaml .Values.resources.web | nindent 12 }}
 ---
@@ -442,24 +442,23 @@ spec:
   ingressClassName: {{ .Values.ingress.className }}
   {{- end }}
   rules:
-    - host: {{ .Values.ingress.hostWeb }}
+    - {{- if .Values.ingress.host }}
+      host: {{ .Values.ingress.host }}
+      {{- end }}
       http:
         paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: factory-web
-                port:
-                  number: {{ .Values.service.web.port }}
-    - host: {{ .Values.ingress.hostApi }}
-      http:
-        paths:
-          - path: /
+          - path: {{ .Values.ingress.apiPathPrefix | default "/api" }}
             pathType: Prefix
             backend:
               service:
                 name: factory-api
                 port:
                   number: {{ .Values.service.api.port }}
+          - path: {{ .Values.ingress.webPathPrefix | default "/" }}
+            pathType: Prefix
+            backend:
+              service:
+                name: factory-web
+                port:
+                  number: {{ .Values.service.web.port }}
 {{- end }}
