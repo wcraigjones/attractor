@@ -63,6 +63,8 @@ Deploy stack to OrbStack Kubernetes:
 npm run k8s:deploy:local
 ```
 
+Provider API keys are not required to install or open the UI. The factory boots keyless and you add project-scoped provider keys later from the Web UI (`Project Secret` panel).
+
 ## Self-Bootstrap Run
 
 After API is reachable (port-forward or ingress), bootstrap the repo and queue a planning run:
@@ -71,7 +73,9 @@ After API is reachable (port-forward or ingress), bootstrap the repo and queue a
 API_BASE_URL=http://localhost:8080 npm run bootstrap:self
 ```
 
-Set provider credentials for the project (required before runs can dispatch):
+Preferred: set provider credentials in the UI (`Project Secret` panel) after project bootstrap.
+
+CLI fallback: set provider credentials for the project (required before runs can dispatch):
 
 ```bash
 PROJECT_ID=<project-id> \
@@ -81,7 +85,7 @@ API_BASE_URL=http://localhost:8080 \
 npm run set:provider-secret
 ```
 
-You can also bootstrap and set the provider secret in one command:
+You can also bootstrap and set the provider secret in one command (CLI fallback):
 
 ```bash
 SET_PROVIDER_SECRET=true \

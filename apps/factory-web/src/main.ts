@@ -160,20 +160,22 @@ app.get("/", (_req, res) => {
           <input id="secretName" value="llm-anthropic" />
         </label>
         <label>Provider
-          <input id="secretProvider" value="anthropic" />
+          <select id="secretProvider"></select>
         </label>
         <div class="row">
           <label>Logical Key
-            <input id="secretLogicalKey" value="apiKey" />
+            <select id="secretLogicalKey"></select>
           </label>
           <label>Secret Key
             <input id="secretKey" value="anthropic_api_key" />
           </label>
         </div>
+        <p class="muted" id="secretProviderHint">Provider key mapping.</p>
         <label>Secret Value
           <input id="secretValue" type="password" placeholder="paste provider API key" />
         </label>
         <button id="upsertSecret">Save Secret</button>
+        <button id="loadSecretProviders" class="secondary">Load Secret Providers</button>
         <button id="loadSecrets" class="secondary">Load Secrets</button>
       </section>
 
@@ -242,12 +244,15 @@ app.get("/", (_req, res) => {
       const attractorSelect = document.getElementById('attractorSelect');
       const runIdInput = document.getElementById('runId');
       const secretNameInput = document.getElementById('secretName');
-      const secretProviderInput = document.getElementById('secretProvider');
-      const secretLogicalKeyInput = document.getElementById('secretLogicalKey');
+      const secretProviderSelect = document.getElementById('secretProvider');
+      const secretLogicalKeySelect = document.getElementById('secretLogicalKey');
       const secretKeyInput = document.getElementById('secretKey');
       const secretValueInput = document.getElementById('secretValue');
+      const secretProviderHint = document.getElementById('secretProviderHint');
 
       let eventSource = null;
+      let secretProviderSchemas = [];
+      const secretProviderSchemaByProvider = {};
 
       const log = (data) => {
         output.textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
@@ -326,6 +331,90 @@ app.get("/", (_req, res) => {
         log(payload);
       }
 
+      function toDefaultSecretKey(schema, logicalKey) {
+        const envName = schema?.envByLogicalKey?.[logicalKey] || logicalKey;
+        return String(envName).toLowerCase();
+      }
+
+      function defaultLogicalKey(schema) {
+        if (!schema) {
+          return '';
+        }
+        if (schema.requiredAll?.length) {
+          return schema.requiredAll[0];
+        }
+        if (schema.requiredAny?.length) {
+          return schema.requiredAny[0];
+        }
+        return Object.keys(schema.envByLogicalKey || {})[0] || '';
+      }
+
+      function renderSecretProviderHint(schema) {
+        if (!schema) {
+          secretProviderHint.textContent = 'Provider key mapping.';
+          return;
+        }
+
+        const requiredAll = schema.requiredAll?.length
+          ? ('Required keys: ' + schema.requiredAll.join(', '))
+          : '';
+        const requiredAny = schema.requiredAny?.length
+          ? ('At least one of: ' + schema.requiredAny.join(', '))
+          : '';
+        const requirements = [requiredAll, requiredAny].filter(Boolean).join(' | ');
+        secretProviderHint.textContent = requirements || 'Provider key mapping.';
+      }
+
+      function syncSecretLogicalKeys(provider, preferredLogicalKey = '') {
+        const schema = secretProviderSchemaByProvider[provider];
+        secretLogicalKeySelect.innerHTML = '';
+        if (!schema) {
+          renderSecretProviderHint(null);
+          return;
+        }
+
+        const logicalKeys = Object.keys(schema.envByLogicalKey || {});
+        for (const logicalKey of logicalKeys) {
+          const opt = document.createElement('option');
+          opt.value = logicalKey;
+          opt.textContent = logicalKey + ' -> ' + schema.envByLogicalKey[logicalKey];
+          secretLogicalKeySelect.appendChild(opt);
+        }
+
+        const keyToSelect = preferredLogicalKey && logicalKeys.includes(preferredLogicalKey)
+          ? preferredLogicalKey
+          : defaultLogicalKey(schema);
+        if (keyToSelect) {
+          secretLogicalKeySelect.value = keyToSelect;
+          secretKeyInput.value = toDefaultSecretKey(schema, keyToSelect);
+        }
+
+        renderSecretProviderHint(schema);
+      }
+
+      async function loadSecretProviders() {
+        const payload = await api('/api/secrets/providers');
+        secretProviderSchemas = payload.providers || [];
+        for (const schema of secretProviderSchemas) {
+          secretProviderSchemaByProvider[schema.provider] = schema;
+        }
+
+        secretProviderSelect.innerHTML = '';
+        for (const schema of secretProviderSchemas) {
+          const opt = document.createElement('option');
+          opt.value = schema.provider;
+          opt.textContent = schema.provider;
+          secretProviderSelect.appendChild(opt);
+        }
+
+        if (!secretProviderSelect.value && secretProviderSchemas.length > 0) {
+          secretProviderSelect.value = secretProviderSchemas[0].provider;
+        }
+
+        syncSecretLogicalKeys(secretProviderSelect.value || 'anthropic');
+        log(payload);
+      }
+
       document.getElementById('bootstrapSelf').addEventListener('click', async () => {
         try {
           const payload = await api('/api/bootstrap/self', {
@@ -361,6 +450,27 @@ app.get("/", (_req, res) => {
         try { await refreshAttractors(); } catch (error) { log(String(error)); }
       });
 
+      document.getElementById('loadSecretProviders').addEventListener('click', async () => {
+        try { await loadSecretProviders(); } catch (error) { log(String(error)); }
+      });
+
+      secretProviderSelect.addEventListener('change', () => {
+        const provider = secretProviderSelect.value;
+        syncSecretLogicalKeys(provider);
+        if (provider) {
+          secretNameInput.value = 'llm-' + provider;
+        }
+      });
+
+      secretLogicalKeySelect.addEventListener('change', () => {
+        const provider = secretProviderSelect.value;
+        const logicalKey = secretLogicalKeySelect.value;
+        const schema = secretProviderSchemaByProvider[provider];
+        if (schema && logicalKey) {
+          secretKeyInput.value = toDefaultSecretKey(schema, logicalKey);
+        }
+      });
+
       document.getElementById('upsertSecret').addEventListener('click', async () => {
         try {
           if (!projectSelect.value) {
@@ -370,9 +480,9 @@ app.get("/", (_req, res) => {
             throw new Error('Secret value is required');
           }
 
-          const logicalKey = secretLogicalKeyInput.value.trim();
+          const logicalKey = secretLogicalKeySelect.value.trim();
           const secretKey = secretKeyInput.value.trim();
-          const provider = secretProviderInput.value.trim();
+          const provider = secretProviderSelect.value.trim();
           if (!logicalKey || !secretKey || !provider) {
             throw new Error('Provider, logical key, and secret key are required');
           }
@@ -502,6 +612,7 @@ app.get("/", (_req, res) => {
       (async () => {
         try {
           await loadProviders();
+          await loadSecretProviders();
           await refreshProjects();
           if (projectSelect.value) {
             await refreshAttractors();

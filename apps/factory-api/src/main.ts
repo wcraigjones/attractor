@@ -461,6 +461,20 @@ app.post("/api/runs", async (req, res) => {
     return sendError(res, 404, "project not found");
   }
 
+  const providerSecret = await prisma.projectSecret.findFirst({
+    where: {
+      projectId: project.id,
+      provider: input.data.modelConfig.provider
+    }
+  });
+  if (!providerSecret) {
+    return sendError(
+      res,
+      409,
+      `Missing provider secret for ${input.data.modelConfig.provider}. Configure it in Project Secret UI first.`
+    );
+  }
+
   const attractorDef = await prisma.attractorDef.findUnique({ where: { id: input.data.attractorDefId } });
   if (!attractorDef || attractorDef.projectId !== project.id) {
     return sendError(res, 404, "attractor definition not found in project");
@@ -563,6 +577,20 @@ app.post("/api/projects/:projectId/self-iterate", async (req, res) => {
   const project = await prisma.project.findUnique({ where: { id: req.params.projectId } });
   if (!project) {
     return sendError(res, 404, "project not found");
+  }
+
+  const providerSecret = await prisma.projectSecret.findFirst({
+    where: {
+      projectId: project.id,
+      provider: input.data.modelConfig.provider
+    }
+  });
+  if (!providerSecret) {
+    return sendError(
+      res,
+      409,
+      `Missing provider secret for ${input.data.modelConfig.provider}. Configure it in Project Secret UI first.`
+    );
   }
 
   const attractorDef = await prisma.attractorDef.findUnique({ where: { id: input.data.attractorDefId } });
