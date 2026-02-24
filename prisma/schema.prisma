@@ -35,6 +35,16 @@ model Project {
   runs                 Run[]
 }
 
+model GlobalSecret {
+  id            String   @id @default(cuid())
+  name          String   @unique
+  provider      String
+  k8sSecretName String
+  keyMappings   Json
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
 model ProjectSecret {
   id            String   @id @default(cuid())
   projectId     String

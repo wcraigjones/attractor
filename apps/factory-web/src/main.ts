@@ -179,6 +179,29 @@ app.get("/", (_req, res) => {
         <button id="loadSecrets" class="secondary">Load Secrets</button>
       </section>
 
+      <section class="card span-4">
+        <h2>Global Secret</h2>
+        <label>Secret Name
+          <input id="globalSecretName" value="global-openai" />
+        </label>
+        <label>Provider
+          <input id="globalSecretProvider" value="openai" />
+        </label>
+        <div class="row">
+          <label>Logical Key
+            <input id="globalSecretLogicalKey" value="apiKey" />
+          </label>
+          <label>Secret Key
+            <input id="globalSecretKey" value="openai_api_key" />
+          </label>
+        </div>
+        <label>Secret Value
+          <input id="globalSecretValue" type="password" placeholder="shared provider key" />
+        </label>
+        <button id="upsertGlobalSecret">Save Global Secret</button>
+        <button id="loadGlobalSecrets" class="secondary">Load Global Secrets</button>
+      </section>
+
       <section class="card span-8">
         <h2>Create Run</h2>
         <div class="row">
@@ -236,7 +259,7 @@ app.get("/", (_req, res) => {
     </div>
 
     <script>
-      const API_BASE = '${API_BASE_URL}';
+      const API_BASE = '${API_BASE_URL}'.replace(/\\/+$/, '');
       const output = document.getElementById('output');
       const providerSelect = document.getElementById('providerSelect');
       const modelList = document.getElementById('modelList');
@@ -249,6 +272,11 @@ app.get("/", (_req, res) => {
       const secretKeyInput = document.getElementById('secretKey');
       const secretValueInput = document.getElementById('secretValue');
       const secretProviderHint = document.getElementById('secretProviderHint');
+      const globalSecretNameInput = document.getElementById('globalSecretName');
+      const globalSecretProviderInput = document.getElementById('globalSecretProvider');
+      const globalSecretLogicalKeyInput = document.getElementById('globalSecretLogicalKey');
+      const globalSecretKeyInput = document.getElementById('globalSecretKey');
+      const globalSecretValueInput = document.getElementById('globalSecretValue');
 
       let eventSource = null;
       let secretProviderSchemas = [];
@@ -258,8 +286,16 @@ app.get("/", (_req, res) => {
         output.textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
       };
 
+      function apiUrl(path) {
+        const normalizedPath = path.startsWith('/') ? path : ('/' + path);
+        if (API_BASE.endsWith('/api') && normalizedPath.startsWith('/api/')) {
+          return API_BASE + normalizedPath.slice(4);
+        }
+        return API_BASE + normalizedPath;
+      }
+
       async function api(path, options = {}) {
-        const response = await fetch(API_BASE + path, {
+        const response = await fetch(apiUrl(path), {
           headers: { 'content-type': 'application/json' },
           ...options
         });
@@ -328,6 +364,11 @@ app.get("/", (_req, res) => {
           throw new Error('Select project first');
         }
         const payload = await api('/api/projects/' + projectSelect.value + '/secrets');
+        log(payload);
+      }
+
+      async function loadGlobalSecrets() {
+        const payload = await api('/api/secrets/global');
         log(payload);
       }
 
@@ -512,6 +553,44 @@ app.get("/", (_req, res) => {
         try { await loadProjectSecrets(); } catch (error) { log(String(error)); }
       });
 
+      document.getElementById('upsertGlobalSecret').addEventListener('click', async () => {
+        try {
+          if (!globalSecretValueInput.value) {
+            throw new Error('Global secret value is required');
+          }
+          const provider = globalSecretProviderInput.value.trim();
+          const logicalKey = globalSecretLogicalKeyInput.value.trim();
+          const secretKey = globalSecretKeyInput.value.trim();
+          const name = globalSecretNameInput.value.trim();
+          if (!provider || !logicalKey || !secretKey || !name) {
+            throw new Error('Global secret name, provider, logical key, and secret key are required');
+          }
+
+          const payload = await api('/api/secrets/global', {
+            method: 'POST',
+            body: JSON.stringify({
+              name,
+              provider,
+              keyMappings: {
+                [logicalKey]: secretKey
+              },
+              values: {
+                [secretKey]: globalSecretValueInput.value
+              }
+            })
+          });
+
+          globalSecretValueInput.value = '';
+          log(payload);
+        } catch (error) {
+          log(String(error));
+        }
+      });
+
+      document.getElementById('loadGlobalSecrets').addEventListener('click', async () => {
+        try { await loadGlobalSecrets(); } catch (error) { log(String(error)); }
+      });
+
       document.getElementById('createRun').addEventListener('click', async () => {
         try {
           if (!projectSelect.value || !attractorSelect.value) {
@@ -586,7 +665,7 @@ app.get("/", (_req, res) => {
           eventSource.close();
         }
 
-        eventSource = new EventSource(API_BASE + '/api/runs/' + runIdInput.value + '/events');
+        eventSource = new EventSource(apiUrl('/api/runs/' + runIdInput.value + '/events'));
         eventSource.onmessage = (event) => {
           const line = event.data;
           output.textContent += '\\n' + line;

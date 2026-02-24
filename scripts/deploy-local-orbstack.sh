@@ -38,6 +38,10 @@ helm upgrade --install factory-system ./deploy/helm/factory-system \
   --set images.runner.repository=attractor/factory-runner \
   --set images.runner.tag="$TAG"
 
+kubectl -n "$NAMESPACE" rollout restart deployment/factory-api >/dev/null
+kubectl -n "$NAMESPACE" rollout restart deployment/factory-web >/dev/null
+kubectl -n "$NAMESPACE" rollout restart deployment/factory-runner-controller >/dev/null
+
 kubectl -n "$NAMESPACE" rollout status deployment/factory-api --timeout=180s
 kubectl -n "$NAMESPACE" rollout status deployment/factory-web --timeout=180s
 kubectl -n "$NAMESPACE" rollout status deployment/factory-runner-controller --timeout=180s

@@ -39,6 +39,8 @@ const PORT = Number(process.env.PORT ?? 8080);
 const HOST = process.env.HOST ?? "0.0.0.0";
 const RUNNER_DEFAULT_IMAGE =
   process.env.RUNNER_IMAGE ?? "ghcr.io/wcraigjones/attractor-runner:latest";
+const GLOBAL_SECRET_NAMESPACE =
+  process.env.GLOBAL_SECRET_NAMESPACE ?? process.env.FACTORY_SYSTEM_NAMESPACE ?? "factory-system";
 
 function hasProvider(provider: string): boolean {
   return getProviders().includes(provider as never);
@@ -124,6 +126,70 @@ async function upsertSecret(namespace: string, secretName: string, values: Recor
   }
 }
 
+function toSecretName(prefix: string, name: string): string {
+  return `${prefix}-${name.toLowerCase().replace(/[^a-z0-9-]+/g, "-")}`;
+}
+
+function decodeSecretData(data: Record<string, string> | undefined): Record<string, string> {
+  if (!data) {
+    return {};
+  }
+  return Object.fromEntries(
+    Object.entries(data).map(([key, value]) => [key, Buffer.from(value, "base64").toString("utf8")])
+  );
+}
+
+async function readSecretValues(namespace: string, secretName: string): Promise<Record<string, string>> {
+  const kube = getKubeApi();
+  if (!kube) {
+    return {};
+  }
+  const existing = await kube.readNamespacedSecret({ name: secretName, namespace });
+  return decodeSecretData(existing.data as Record<string, string> | undefined);
+}
+
+async function syncGlobalSecretsToNamespace(namespace: string): Promise<void> {
+  const globals = await prisma.globalSecret.findMany();
+  for (const secret of globals) {
+    try {
+      const values = await readSecretValues(GLOBAL_SECRET_NAMESPACE, secret.k8sSecretName);
+      if (Object.keys(values).length === 0) {
+        continue;
+      }
+      await upsertSecret(namespace, secret.k8sSecretName, values);
+    } catch (error) {
+      process.stderr.write(
+        `global secret sync skipped for ${secret.name} in namespace ${namespace}: ${error}\n`
+      );
+    }
+  }
+}
+
+async function propagateGlobalSecretToAllProjects(secretName: string, values: Record<string, string>) {
+  const projects = await prisma.project.findMany({ select: { namespace: true } });
+  for (const project of projects) {
+    await upsertSecret(project.namespace, secretName, values);
+  }
+}
+
+async function hasEffectiveProviderSecret(projectId: string, provider: string): Promise<boolean> {
+  const [projectSecret, globalSecret] = await Promise.all([
+    prisma.projectSecret.findFirst({
+      where: {
+        projectId,
+        provider
+      }
+    }),
+    prisma.globalSecret.findFirst({
+      where: {
+        provider
+      }
+    })
+  ]);
+
+  return !!projectSecret || !!globalSecret;
+}
+
 async function appendRunEvent(runId: string, type: string, payload: unknown): Promise<void> {
   const event = await prisma.runEvent.create({
     data: {
@@ -207,12 +273,14 @@ const createProjectSchema = z.object({
 async function createProjectRecord(input: { name: string; namespace?: string }) {
   const namespace = input.namespace ?? toProjectNamespace(input.name);
   await ensureNamespace(namespace);
-  return prisma.project.create({
+  const project = await prisma.project.create({
     data: {
       name: input.name,
       namespace
     }
   });
+  await syncGlobalSecretsToNamespace(namespace);
+  return project;
 }
 
 app.post("/api/projects", async (req, res) => {
@@ -266,6 +334,8 @@ app.post("/api/bootstrap/self", async (req, res) => {
       ...(input.data.installationId ? { githubInstallationId: input.data.installationId } : {})
     }
   });
+
+  await syncGlobalSecretsToNamespace(namespace);
 
   const attractor = await prisma.attractorDef.upsert({
     where: {
@@ -325,6 +395,63 @@ const createSecretSchema = z.object({
   values: z.record(z.string(), z.string())
 });
 
+app.post("/api/secrets/global", async (req, res) => {
+  const input = createSecretSchema.safeParse(req.body);
+  if (!input.success) {
+    return sendError(res, 400, input.error.message);
+  }
+
+  const secretName = input.data.k8sSecretName ?? toSecretName("factory-global", input.data.name);
+  const mappedSecretKeys = new Set(Object.values(input.data.keyMappings));
+  const missingSecretValues = [...mappedSecretKeys].filter((secretKey) => !(secretKey in input.data.values));
+  if (missingSecretValues.length > 0) {
+    return sendError(
+      res,
+      400,
+      `Secret values missing keys referenced by keyMappings: ${missingSecretValues.join(", ")}`
+    );
+  }
+
+  try {
+    materializeProviderSecretEnv({
+      provider: input.data.provider,
+      secretName,
+      keys: input.data.keyMappings
+    });
+  } catch (error) {
+    return sendError(res, 400, error instanceof Error ? error.message : String(error));
+  }
+
+  await upsertSecret(GLOBAL_SECRET_NAMESPACE, secretName, input.data.values);
+  await propagateGlobalSecretToAllProjects(secretName, input.data.values);
+
+  const saved = await prisma.globalSecret.upsert({
+    where: {
+      name: input.data.name
+    },
+    update: {
+      provider: input.data.provider,
+      k8sSecretName: secretName,
+      keyMappings: input.data.keyMappings
+    },
+    create: {
+      name: input.data.name,
+      provider: input.data.provider,
+      k8sSecretName: secretName,
+      keyMappings: input.data.keyMappings
+    }
+  });
+
+  res.status(201).json(saved);
+});
+
+app.get("/api/secrets/global", async (_req, res) => {
+  const secrets = await prisma.globalSecret.findMany({
+    orderBy: { createdAt: "desc" }
+  });
+  res.json({ secrets });
+});
+
 app.post("/api/projects/:projectId/secrets", async (req, res) => {
   const input = createSecretSchema.safeParse(req.body);
   if (!input.success) {
@@ -336,7 +463,7 @@ app.post("/api/projects/:projectId/secrets", async (req, res) => {
     return sendError(res, 404, "project not found");
   }
 
-  const secretName = input.data.k8sSecretName ?? `factory-secret-${input.data.name.toLowerCase().replace(/[^a-z0-9-]+/g, "-")}`;
+  const secretName = input.data.k8sSecretName ?? toSecretName("factory-secret", input.data.name);
 
   const mappedSecretKeys = new Set(Object.values(input.data.keyMappings));
   const missingSecretValues = [...mappedSecretKeys].filter((secretKey) => !(secretKey in input.data.values));
@@ -471,17 +598,12 @@ app.post("/api/runs", async (req, res) => {
     return sendError(res, 404, "project not found");
   }
 
-  const providerSecret = await prisma.projectSecret.findFirst({
-    where: {
-      projectId: project.id,
-      provider: input.data.modelConfig.provider
-    }
-  });
-  if (!providerSecret) {
+  const providerSecretExists = await hasEffectiveProviderSecret(project.id, input.data.modelConfig.provider);
+  if (!providerSecretExists) {
     return sendError(
       res,
       409,
-      `Missing provider secret for ${input.data.modelConfig.provider}. Configure it in Project Secret UI first.`
+      `Missing provider secret for ${input.data.modelConfig.provider}. Configure it in Project Secret or Global Secret UI first.`
     );
   }
 
@@ -589,17 +711,12 @@ app.post("/api/projects/:projectId/self-iterate", async (req, res) => {
     return sendError(res, 404, "project not found");
   }
 
-  const providerSecret = await prisma.projectSecret.findFirst({
-    where: {
-      projectId: project.id,
-      provider: input.data.modelConfig.provider
-    }
-  });
-  if (!providerSecret) {
+  const providerSecretExists = await hasEffectiveProviderSecret(project.id, input.data.modelConfig.provider);
+  if (!providerSecretExists) {
     return sendError(
       res,
       409,
-      `Missing provider secret for ${input.data.modelConfig.provider}. Configure it in Project Secret UI first.`
+      `Missing provider secret for ${input.data.modelConfig.provider}. Configure it in Project Secret or Global Secret UI first.`
     );
   }
 

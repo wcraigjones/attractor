@@ -67,6 +67,8 @@ The deploy script installs Traefik, applies the factory ingress, and prints dire
 
 Provider API keys are not required to install or open the UI. The factory boots keyless and you add project-scoped provider keys later from the Web UI (`Project Secret` panel).
 
+Global shared secrets are also supported from the Web UI (`Global Secret` panel). Global secrets are replicated into each project namespace, and project secrets override global secrets for the same provider.
+
 ## Self-Bootstrap Run
 
 After API is reachable (use the `API URL` printed by `npm run k8s:deploy:local`), bootstrap the repo and queue a planning run:
@@ -76,6 +78,8 @@ API_BASE_URL=http://<traefik-ip>/api npm run bootstrap:self
 ```
 
 Preferred: set provider credentials in the UI (`Project Secret` panel) after project bootstrap.
+
+If a key should be shared across projects, set it once in the UI (`Global Secret` panel) and skip per-project setup unless you need project-specific overrides.
 
 CLI fallback: set provider credentials for the project (required before runs can dispatch):
 
@@ -130,6 +134,8 @@ Implemented endpoints:
 - `GET /api/models?provider=<provider>`
 - `GET /api/secrets/providers`
 - `GET /api/secrets/providers/{provider}`
+- `POST /api/secrets/global`
+- `GET /api/secrets/global`
 - `POST /api/projects`
 - `GET /api/projects`
 - `POST /api/bootstrap/self`

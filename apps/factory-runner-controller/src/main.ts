@@ -167,12 +167,31 @@ async function processRun(runId: string): Promise<void> {
   try {
     await ensureServiceAccount(run.project.namespace, SERVICE_ACCOUNT);
 
-    const secrets = await prisma.projectSecret.findMany({ where: { projectId: run.projectId } });
-    const mappings: ProjectProviderSecretMapping[] = secrets.map((secret) => ({
+    const [projectSecrets, globalSecrets] = await Promise.all([
+      prisma.projectSecret.findMany({ where: { projectId: run.projectId } }),
+      prisma.globalSecret.findMany()
+    ]);
+
+    const globalMappings: ProjectProviderSecretMapping[] = globalSecrets.map((secret) => ({
       provider: secret.provider,
       secretName: secret.k8sSecretName,
       keys: secret.keyMappings as Record<string, string>
     }));
+    const projectMappings: ProjectProviderSecretMapping[] = projectSecrets.map((secret) => ({
+      provider: secret.provider,
+      secretName: secret.k8sSecretName,
+      keys: secret.keyMappings as Record<string, string>
+    }));
+
+    // Project mappings intentionally override global mappings for the same provider.
+    const mappingsByProvider = new Map<string, ProjectProviderSecretMapping>();
+    for (const mapping of globalMappings) {
+      mappingsByProvider.set(mapping.provider, mapping);
+    }
+    for (const mapping of projectMappings) {
+      mappingsByProvider.set(mapping.provider, mapping);
+    }
+    const mappings = [...mappingsByProvider.values()];
 
     const modelConfig = await modelConfigForRun(run.id);
     const providerSecretExists = mappings.some((mapping) => mapping.provider === modelConfig.provider);
@@ -206,7 +225,10 @@ async function processRun(runId: string): Promise<void> {
       targetBranch: run.targetBranch,
       ...(run.specBundleId ? { specBundleId: run.specBundleId } : {}),
       modelConfig,
-      secretsRef: secrets.map((secret) => secret.name),
+      secretsRef: [
+        ...globalSecrets.map((secret) => `global:${secret.name}`),
+        ...projectSecrets.map((secret) => `project:${secret.name}`)
+      ],
       artifactPrefix: `${run.projectId}/${run.id}`
     };
 
