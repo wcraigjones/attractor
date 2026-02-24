@@ -38,7 +38,8 @@
     "phase0:helm:template": "helm template factory-system deploy/helm/factory-system -f deploy/helm/factory-system/values.local-orbstack.yaml",
     "images:build:local": "./scripts/build-local-images.sh dev",
     "k8s:deploy:local": "./scripts/deploy-local-orbstack.sh dev",
-    "bootstrap:self": "./scripts/bootstrap-self.sh"
+    "bootstrap:self": "./scripts/bootstrap-self.sh",
+    "self:iterate": "./scripts/self-iterate.sh"
   },
   "engines": {
     "node": ">=20.0.0"

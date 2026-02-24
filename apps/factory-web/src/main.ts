@@ -192,6 +192,7 @@ app.get("/", (_req, res) => {
           </label>
         </div>
         <button id="createRun">Queue Run</button>
+        <button id="selfIterate" class="secondary">Queue Implementation From Latest Plan</button>
       </section>
 
       <section class="card span-4">
@@ -353,6 +354,33 @@ app.get("/", (_req, res) => {
           const payload = await api('/api/runs', {
             method: 'POST',
             body: JSON.stringify(body)
+          });
+          runIdInput.value = payload.runId;
+          log(payload);
+        } catch (error) {
+          log(String(error));
+        }
+      });
+
+      document.getElementById('selfIterate').addEventListener('click', async () => {
+        try {
+          if (!projectSelect.value || !attractorSelect.value) {
+            throw new Error('Project and attractor are required');
+          }
+
+          const payload = await api('/api/projects/' + projectSelect.value + '/self-iterate', {
+            method: 'POST',
+            body: JSON.stringify({
+              attractorDefId: attractorSelect.value,
+              sourceBranch: document.getElementById('runSourceBranch').value,
+              targetBranch: document.getElementById('runTargetBranch').value,
+              modelConfig: {
+                provider: document.getElementById('runProvider').value,
+                modelId: document.getElementById('runModelId').value,
+                reasoningLevel: document.getElementById('runReasoning').value,
+                temperature: Number(document.getElementById('runTemperature').value)
+              }
+            })
           });
           runIdInput.value = payload.runId;
           log(payload);

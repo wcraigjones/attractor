@@ -497,6 +497,110 @@ app.post("/api/runs", async (req, res) => {
   res.status(201).json({ runId: run.id, status: run.status });
 });
 
+const selfIterateSchema = z.object({
+  attractorDefId: z.string().min(1),
+  sourceBranch: z.string().min(1),
+  targetBranch: z.string().min(1),
+  modelConfig: z.object({
+    provider: z.string().min(1),
+    modelId: z.string().min(1),
+    reasoningLevel: z.enum(["minimal", "low", "medium", "high", "xhigh"]).optional(),
+    temperature: z.number().optional(),
+    maxTokens: z.number().int().positive().optional()
+  }),
+  force: z.boolean().optional()
+});
+
+app.post("/api/projects/:projectId/self-iterate", async (req, res) => {
+  const input = selfIterateSchema.safeParse(req.body);
+  if (!input.success) {
+    return sendError(res, 400, input.error.message);
+  }
+
+  try {
+    normalizeRunModelConfig(input.data.modelConfig);
+  } catch (error) {
+    return sendError(res, 400, error instanceof Error ? error.message : String(error));
+  }
+
+  const project = await prisma.project.findUnique({ where: { id: req.params.projectId } });
+  if (!project) {
+    return sendError(res, 404, "project not found");
+  }
+
+  const attractorDef = await prisma.attractorDef.findUnique({ where: { id: input.data.attractorDefId } });
+  if (!attractorDef || attractorDef.projectId !== project.id) {
+    return sendError(res, 404, "attractor definition not found in project");
+  }
+
+  const latestPlanningRun = await prisma.run.findFirst({
+    where: {
+      projectId: project.id,
+      runType: RunType.planning,
+      status: RunStatus.SUCCEEDED,
+      specBundleId: { not: null }
+    },
+    orderBy: {
+      finishedAt: "desc"
+    }
+  });
+
+  if (!latestPlanningRun?.specBundleId) {
+    return sendError(res, 409, "no successful planning run with a spec bundle is available");
+  }
+
+  if (!input.data.force) {
+    const collision = await prisma.run.findFirst({
+      where: {
+        projectId: project.id,
+        runType: RunType.implementation,
+        targetBranch: input.data.targetBranch,
+        status: { in: [RunStatus.QUEUED, RunStatus.RUNNING] }
+      }
+    });
+
+    if (collision) {
+      return sendError(
+        res,
+        409,
+        `Branch collision: run ${collision.id} is already active on ${input.data.targetBranch}`
+      );
+    }
+  }
+
+  const run = await prisma.run.create({
+    data: {
+      projectId: project.id,
+      attractorDefId: attractorDef.id,
+      runType: RunType.implementation,
+      sourceBranch: input.data.sourceBranch,
+      targetBranch: input.data.targetBranch,
+      status: RunStatus.QUEUED,
+      specBundleId: latestPlanningRun.specBundleId
+    }
+  });
+
+  await appendRunEvent(run.id, "RunQueued", {
+    runId: run.id,
+    runType: run.runType,
+    projectId: run.projectId,
+    targetBranch: run.targetBranch,
+    modelConfig: input.data.modelConfig,
+    runnerImage: RUNNER_DEFAULT_IMAGE,
+    sourcePlanningRunId: latestPlanningRun.id,
+    sourceSpecBundleId: latestPlanningRun.specBundleId
+  });
+
+  await redis.lpush(runQueueKey(), run.id);
+
+  res.status(201).json({
+    runId: run.id,
+    status: run.status,
+    sourcePlanningRunId: latestPlanningRun.id,
+    sourceSpecBundleId: latestPlanningRun.specBundleId
+  });
+});
+
 app.get("/api/runs/:runId", async (req, res) => {
   const run = await prisma.run.findUnique({
     where: { id: req.params.runId },
