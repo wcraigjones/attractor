@@ -25,6 +25,7 @@ import {
   type ToolCall
 } from "@mariozechner/pi-ai";
 import { runCancelKey, runEventChannel, runLockKey, type RunExecutionSpec } from "@attractor/shared-types";
+import { extractUnifiedDiff } from "./patch.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -242,6 +243,19 @@ function gitRemote(repoFullName: string): string {
 async function runCommand(command: string, args: string[], cwd: string): Promise<string> {
   const result = await execFileAsync(command, args, { cwd });
   return `${result.stdout ?? ""}${result.stderr ?? ""}`;
+}
+
+async function hasStagedChanges(cwd: string): Promise<boolean> {
+  try {
+    await execFileAsync("git", ["diff", "--cached", "--quiet"], { cwd });
+    return false;
+  } catch (error) {
+    const code = (error as { code?: number | string })?.code;
+    if (code === 1 || code === "1") {
+      return true;
+    }
+    throw error;
+  }
 }
 
 async function checkoutRepository(runId: string, repoFullName: string, sourceBranch: string): Promise<string> {
@@ -468,7 +482,9 @@ async function processRun(spec: RunExecutionSpec): Promise<void> {
       `Repository: ${run.project.repoFullName}`,
       `Source branch: ${run.sourceBranch}`,
       `Target branch: ${run.targetBranch}`,
-      "Use the plan and produce concrete implementation steps and code-change notes.",
+      "Use the plan to produce concrete code changes.",
+      "Return a concise summary and a valid unified git diff in a fenced ```diff block.",
+      "The diff must be directly applicable from repository root with git apply.",
       "Plan:",
       planText
     ].join("\n\n");
@@ -483,6 +499,50 @@ async function processRun(spec: RunExecutionSpec): Promise<void> {
     writeFileSync(outputFile, implementationText, "utf8");
 
     await runCommand("git", ["add", outputFile], workDir);
+
+    const extractedDiff = extractUnifiedDiff(implementationText);
+    if (extractedDiff) {
+      await appendRunEvent(run.id, "ImplementationPatchExtracted", {
+        runId: run.id,
+        bytes: Buffer.byteLength(extractedDiff, "utf8")
+      });
+      const patchFile = join(outputDir, `implementation-${run.id}.patch`);
+      writeFileSync(patchFile, extractedDiff, "utf8");
+
+      try {
+        await runCommand("git", ["apply", "--index", patchFile], workDir);
+      } catch (error) {
+        await appendRunEvent(run.id, "ImplementationPatchApplyFailed", {
+          runId: run.id,
+          message: error instanceof Error ? error.message : String(error)
+        });
+        throw error;
+      }
+
+      const patchArtifactPath = `runs/${run.projectId}/${run.id}/implementation.patch`;
+      await putObject(patchArtifactPath, extractedDiff, "text/x-diff");
+      await prisma.artifact.create({
+        data: {
+          runId: run.id,
+          key: "implementation.patch",
+          path: patchArtifactPath
+        }
+      });
+
+      await appendRunEvent(run.id, "ImplementationPatchApplied", {
+        runId: run.id,
+        patchArtifactPath
+      });
+    } else {
+      await appendRunEvent(run.id, "ImplementationPatchMissing", {
+        runId: run.id
+      });
+    }
+
+    if (!(await hasStagedChanges(workDir))) {
+      throw new Error("Implementation run produced no staged changes");
+    }
+
     await runCommand("git", ["commit", "-m", `attractor: implementation run ${run.id}`], workDir);
     await runCommand("git", ["push", "origin", run.targetBranch, "--force-with-lease"], workDir);
 
