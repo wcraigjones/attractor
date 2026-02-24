@@ -97,6 +97,15 @@ Queue an implementation run from the latest successful planning bundle:
 PROJECT_ID=<project-id> ATTRACTOR_ID=<attractor-id> API_BASE_URL=http://localhost:8080 npm run self:iterate
 ```
 
+Run the full self-factory loop (bootstrap, secret setup, planning, implementation, wait for completion):
+
+```bash
+MODEL_PROVIDER=anthropic \
+ANTHROPIC_API_KEY=<key> \
+API_BASE_URL=http://localhost:8080 \
+npm run self:cycle
+```
+
 ## LLM Runtime
 
 Attractor now mandates [`@mariozechner/pi-ai`](https://github.com/badlogic/pi-mono/tree/main/packages/ai) as the only LLM runtime layer for node execution. No direct provider SDK imports are used in source modules.
