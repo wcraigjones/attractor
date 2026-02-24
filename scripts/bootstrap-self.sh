@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+API_BASE_URL="${API_BASE_URL:-http://localhost:8080}"
+REPO_FULL_NAME="${REPO_FULL_NAME:-wcraigjones/attractor}"
+DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
+ATTRACTOR_PATH="${ATTRACTOR_PATH:-factory/self-bootstrap.dot}"
+MODEL_PROVIDER="${MODEL_PROVIDER:-anthropic}"
+MODEL_ID="${MODEL_ID:-claude-sonnet-4-20250514}"
+REASONING_LEVEL="${REASONING_LEVEL:-high}"
+TARGET_BRANCH="${TARGET_BRANCH:-attractor/self-factory}"
+
+bootstrap_payload=$(cat <<JSON
+{
+  "repoFullName": "$REPO_FULL_NAME",
+  "defaultBranch": "$DEFAULT_BRANCH",
+  "attractorPath": "$ATTRACTOR_PATH"
+}
+JSON
+)
+
+bootstrap_response=$(curl -sS -X POST "$API_BASE_URL/api/bootstrap/self" \
+  -H 'content-type: application/json' \
+  -d "$bootstrap_payload")
+
+echo "Bootstrap response:"
+echo "$bootstrap_response"
+
+project_id=$(node -e 'const d=JSON.parse(process.argv[1]); console.log(d.project.id)' "$bootstrap_response")
+attractor_id=$(node -e 'const d=JSON.parse(process.argv[1]); console.log(d.attractor.id)' "$bootstrap_response")
+
+run_payload=$(cat <<JSON
+{
+  "projectId": "$project_id",
+  "attractorDefId": "$attractor_id",
+  "runType": "planning",
+  "sourceBranch": "$DEFAULT_BRANCH",
+  "targetBranch": "$TARGET_BRANCH",
+  "modelConfig": {
+    "provider": "$MODEL_PROVIDER",
+    "modelId": "$MODEL_ID",
+    "reasoningLevel": "$REASONING_LEVEL",
+    "temperature": 0.2
+  }
+}
+JSON
+)
+
+run_response=$(curl -sS -X POST "$API_BASE_URL/api/runs" \
+  -H 'content-type: application/json' \
+  -d "$run_payload")
+
+echo "Run response:"
+echo "$run_response"
+
+echo "Tip: stream events with"
+echo "  curl -N $API_BASE_URL/api/runs/\$(node -e 'const d=JSON.parse(process.argv[1]); console.log(d.runId)' '$run_response')/events"

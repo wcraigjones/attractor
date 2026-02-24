@@ -129,6 +129,8 @@ export function buildRunnerJobManifest(input: {
   postgresUrl: string;
   minioEndpoint: string;
   minioBucket: string;
+  minioAccessKey: string;
+  minioSecretKey: string;
   serviceAccountName?: string;
 }): V1Job {
   const name = `factory-run-${input.runId}`.slice(0, 63);
@@ -171,6 +173,8 @@ export function buildRunnerJobManifest(input: {
                 { name: "DATABASE_URL", value: input.postgresUrl },
                 { name: "MINIO_ENDPOINT", value: input.minioEndpoint },
                 { name: "MINIO_BUCKET", value: input.minioBucket },
+                { name: "MINIO_ACCESS_KEY", value: input.minioAccessKey },
+                { name: "MINIO_SECRET_KEY", value: input.minioSecretKey },
                 ...input.secretEnv
               ],
               resources: {

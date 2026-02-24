@@ -177,21 +177,24 @@ const createProjectSchema = z.object({
   namespace: z.string().min(2).max(63).optional()
 });
 
+async function createProjectRecord(input: { name: string; namespace?: string }) {
+  const namespace = input.namespace ?? toProjectNamespace(input.name);
+  await ensureNamespace(namespace);
+  return prisma.project.create({
+    data: {
+      name: input.name,
+      namespace
+    }
+  });
+}
+
 app.post("/api/projects", async (req, res) => {
   const input = createProjectSchema.safeParse(req.body);
   if (!input.success) {
     return sendError(res, 400, input.error.message);
   }
 
-  const namespace = input.data.namespace ?? toProjectNamespace(input.data.name);
-  await ensureNamespace(namespace);
-
-  const project = await prisma.project.create({
-    data: {
-      name: input.data.name,
-      namespace
-    }
-  });
+  const project = await createProjectRecord(input.data);
 
   res.status(201).json(project);
 });
@@ -199,6 +202,68 @@ app.post("/api/projects", async (req, res) => {
 app.get("/api/projects", async (_req, res) => {
   const projects = await prisma.project.findMany({ orderBy: { createdAt: "desc" } });
   res.json({ projects });
+});
+
+const bootstrapSelfSchema = z.object({
+  name: z.string().min(2).max(80).default("attractor-self"),
+  namespace: z.string().min(2).max(63).optional(),
+  repoFullName: z.string().min(3),
+  defaultBranch: z.string().min(1).default("main"),
+  installationId: z.string().min(1).optional(),
+  attractorName: z.string().min(1).default("self-factory"),
+  attractorPath: z.string().min(1).default("factory/self-bootstrap.dot")
+});
+
+app.post("/api/bootstrap/self", async (req, res) => {
+  const input = bootstrapSelfSchema.safeParse(req.body);
+  if (!input.success) {
+    return sendError(res, 400, input.error.message);
+  }
+
+  const namespace = input.data.namespace ?? toProjectNamespace(input.data.name);
+  await ensureNamespace(namespace);
+
+  const project = await prisma.project.upsert({
+    where: { namespace },
+    update: {
+      name: input.data.name,
+      repoFullName: input.data.repoFullName,
+      defaultBranch: input.data.defaultBranch,
+      ...(input.data.installationId ? { githubInstallationId: input.data.installationId } : {})
+    },
+    create: {
+      name: input.data.name,
+      namespace,
+      repoFullName: input.data.repoFullName,
+      defaultBranch: input.data.defaultBranch,
+      ...(input.data.installationId ? { githubInstallationId: input.data.installationId } : {})
+    }
+  });
+
+  const attractor = await prisma.attractorDef.upsert({
+    where: {
+      projectId_name: {
+        projectId: project.id,
+        name: input.data.attractorName
+      }
+    },
+    update: {
+      repoPath: input.data.attractorPath,
+      defaultRunType: "planning",
+      active: true,
+      description: "Self-bootstrap attractor pipeline for this repository"
+    },
+    create: {
+      projectId: project.id,
+      name: input.data.attractorName,
+      repoPath: input.data.attractorPath,
+      defaultRunType: "planning",
+      active: true,
+      description: "Self-bootstrap attractor pipeline for this repository"
+    }
+  });
+
+  res.status(201).json({ project, attractor });
 });
 
 const githubConnectSchema = z.object({
@@ -316,6 +381,15 @@ app.get("/api/projects/:projectId/attractors", async (req, res) => {
   res.json({ attractors });
 });
 
+app.get("/api/projects/:projectId/runs", async (req, res) => {
+  const runs = await prisma.run.findMany({
+    where: { projectId: req.params.projectId },
+    orderBy: { createdAt: "desc" },
+    take: 100
+  });
+  res.json({ runs });
+});
+
 const createRunSchema = z.object({
   projectId: z.string().min(1),
   attractorDefId: z.string().min(1),
@@ -353,6 +427,29 @@ app.post("/api/runs", async (req, res) => {
   const attractorDef = await prisma.attractorDef.findUnique({ where: { id: input.data.attractorDefId } });
   if (!attractorDef || attractorDef.projectId !== project.id) {
     return sendError(res, 404, "attractor definition not found in project");
+  }
+  if (!attractorDef.active) {
+    return sendError(res, 409, "attractor definition is inactive");
+  }
+
+  if (input.data.runType === "planning" && input.data.specBundleId) {
+    return sendError(res, 400, "planning runs must not set specBundleId");
+  }
+
+  if (input.data.runType === "implementation" && !input.data.specBundleId) {
+    return sendError(res, 400, "implementation runs require specBundleId");
+  }
+
+  if (input.data.specBundleId) {
+    const specBundle = await prisma.specBundle.findUnique({
+      where: { id: input.data.specBundleId }
+    });
+    if (!specBundle) {
+      return sendError(res, 404, "spec bundle not found");
+    }
+    if (specBundle.schemaVersion !== "v1") {
+      return sendError(res, 409, `unsupported spec bundle schema version: ${specBundle.schemaVersion}`);
+    }
   }
 
   if (input.data.runType === "implementation" && !input.data.force) {

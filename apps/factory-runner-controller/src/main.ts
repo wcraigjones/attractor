@@ -2,6 +2,7 @@ import { BatchV1Api, CoreV1Api, KubeConfig } from "@kubernetes/client-node";
 import { PrismaClient, RunStatus, RunType } from "@prisma/client";
 import { Redis } from "ioredis";
 import {
+  runCancelKey,
   runEventChannel,
   runLockKey,
   runQueueKey,
@@ -24,6 +25,8 @@ const FACTORY_API_BASE_URL = process.env.FACTORY_API_BASE_URL ?? "http://factory
 const POSTGRES_URL = process.env.DATABASE_URL ?? "postgresql://postgres:postgres@postgres.factory-system.svc.cluster.local:5432/factory";
 const MINIO_ENDPOINT = process.env.MINIO_ENDPOINT ?? "http://minio.factory-system.svc.cluster.local:9000";
 const MINIO_BUCKET = process.env.MINIO_BUCKET ?? "factory-artifacts";
+const MINIO_ACCESS_KEY = process.env.MINIO_ACCESS_KEY ?? "minioadmin";
+const MINIO_SECRET_KEY = process.env.MINIO_SECRET_KEY ?? "minioadmin";
 const SERVICE_ACCOUNT = process.env.RUNNER_SERVICE_ACCOUNT ?? "factory-runner";
 
 const kc = new KubeConfig();
@@ -116,6 +119,19 @@ async function processRun(runId: string): Promise<void> {
     return;
   }
 
+  const canceled = await redis.get(runCancelKey(run.id));
+  if (canceled) {
+    await prisma.run.update({
+      where: { id: run.id },
+      data: {
+        status: RunStatus.CANCELED,
+        finishedAt: new Date()
+      }
+    });
+    await appendRunEvent(run.id, "RunCanceledBeforeDispatch", { runId: run.id });
+    return;
+  }
+
   const activeRuns = await prisma.run.count({
     where: {
       projectId: run.projectId,
@@ -185,6 +201,8 @@ async function processRun(runId: string): Promise<void> {
       postgresUrl: POSTGRES_URL,
       minioEndpoint: MINIO_ENDPOINT,
       minioBucket: MINIO_BUCKET,
+      minioAccessKey: MINIO_ACCESS_KEY,
+      minioSecretKey: MINIO_SECRET_KEY,
       serviceAccountName: SERVICE_ACCOUNT
     });
 

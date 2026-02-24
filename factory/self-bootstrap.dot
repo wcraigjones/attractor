@@ -1,0 +1,14 @@
+digraph SelfBootstrap {
+  graph [
+    goal="Enable Attractor Factory to plan and implement changes in this repository"
+  ]
+
+  start [shape=Mdiamond, label="Start"]
+  plan [shape=box, label="Plan", prompt="Create a concrete implementation plan for improving this repository."]
+  implement [shape=box, label="Implement", prompt="Implement the planned improvements and prepare a PR summary."]
+  done [shape=Msquare, label="Done"]
+
+  start -> plan
+  plan -> implement
+  implement -> done
+}

@@ -4,7 +4,13 @@ import { tmpdir } from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import {
+  S3Client,
+  PutObjectCommand,
+  GetObjectCommand,
+  HeadBucketCommand,
+  CreateBucketCommand
+} from "@aws-sdk/client-s3";
 import { App as GitHubApp } from "@octokit/app";
 import { PrismaClient, RunStatus, RunType } from "@prisma/client";
 import { Redis } from "ioredis";
@@ -185,6 +191,21 @@ async function runCodergen(prompt: string, spec: RunExecutionSpec, runId: string
   throw new Error(`Model loop exceeded ${maxRounds} rounds`);
 }
 
+async function ensureBucketExists(): Promise<void> {
+  try {
+    await minioClient.send(new HeadBucketCommand({ Bucket: MINIO_BUCKET }));
+    return;
+  } catch (error) {
+    const status = (error as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode;
+    const name = (error as { name?: string })?.name;
+    if (status === 404 || name === "NotFound" || name === "NoSuchBucket") {
+      await minioClient.send(new CreateBucketCommand({ Bucket: MINIO_BUCKET }));
+      return;
+    }
+    throw error;
+  }
+}
+
 async function putObject(key: string, content: string, contentType = "text/plain"): Promise<void> {
   await minioClient.send(
     new PutObjectCommand({
@@ -296,23 +317,41 @@ function githubApp(): GitHubApp | null {
 }
 
 async function createPullRequest(args: {
-  installationId: string;
+  installationId?: string;
   repoFullName: string;
   baseBranch: string;
   headBranch: string;
   runId: string;
   body: string;
 }): Promise<string | null> {
-  const app = githubApp();
-  if (!app) {
-    return null;
-  }
-
   const [owner, repo] = args.repoFullName.split("/");
   if (!owner || !repo) {
     throw new Error(`Invalid repoFullName: ${args.repoFullName}`);
   }
-  const octokit = await app.getInstallationOctokit(Number(args.installationId));
+
+  if (args.installationId) {
+    const app = githubApp();
+    if (app) {
+      const octokit = await app.getInstallationOctokit(Number(args.installationId));
+      const pr = await octokit.request("POST /repos/{owner}/{repo}/pulls", {
+        owner,
+        repo,
+        base: args.baseBranch,
+        head: args.headBranch,
+        title: `Attractor run ${args.runId}`,
+        body: args.body
+      });
+      return pr.data.html_url ?? null;
+    }
+  }
+
+  const token = process.env.GITHUB_TOKEN;
+  if (!token) {
+    return null;
+  }
+
+  const { Octokit } = await import("@octokit/rest");
+  const octokit = new Octokit({ auth: token });
   const pr = await octokit.request("POST /repos/{owner}/{repo}/pulls", {
     owner,
     repo,
@@ -448,16 +487,24 @@ async function processRun(spec: RunExecutionSpec): Promise<void> {
     await runCommand("git", ["push", "origin", run.targetBranch, "--force-with-lease"], workDir);
 
     let prUrl: string | null = null;
-    if (run.project.githubInstallationId) {
-      prUrl = await createPullRequest({
-        installationId: run.project.githubInstallationId,
-        repoFullName: run.project.repoFullName,
-        baseBranch: run.project.defaultBranch ?? run.sourceBranch,
-        headBranch: run.targetBranch,
+    const artifactPath = `runs/${run.projectId}/${run.id}/implementation-note.md`;
+    await putObject(artifactPath, implementationText, "text/markdown");
+    await prisma.artifact.create({
+      data: {
         runId: run.id,
-        body: `Automated implementation run ${run.id}`
-      });
-    }
+        key: "implementation-note.md",
+        path: artifactPath
+      }
+    });
+
+    prUrl = await createPullRequest({
+      installationId: run.project.githubInstallationId ?? undefined,
+      repoFullName: run.project.repoFullName,
+      baseBranch: run.project.defaultBranch ?? run.sourceBranch,
+      headBranch: run.targetBranch,
+      runId: run.id,
+      body: `Automated implementation run ${run.id}`
+    });
 
     await prisma.run.update({
       where: { id: run.id },
@@ -483,6 +530,7 @@ async function processRun(spec: RunExecutionSpec): Promise<void> {
 
 async function main() {
   const spec = parseSpec();
+  await ensureBucketExists();
 
   try {
     await processRun(spec);

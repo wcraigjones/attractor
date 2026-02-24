@@ -211,6 +211,8 @@ spec:
         - name: api
           image: "{{ .Values.images.api.repository }}:{{ .Values.images.api.tag }}"
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          command: ["sh", "-lc"]
+          args: ["npm run prisma:migrate:deploy && node apps/factory-api/dist/main.js"]
           ports:
             - containerPort: {{ .Values.service.api.port }}
           env:
@@ -224,6 +226,16 @@ spec:
               value: "{{ .Values.images.runner.repository }}:{{ .Values.images.runner.tag }}"
             - name: MINIO_BUCKET
               value: {{ .Values.minio.bucket | quote }}
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-auth
+                  key: MINIO_ROOT_USER
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-auth
+                  key: MINIO_ROOT_PASSWORD
           resources:
             {{- toYaml .Values.resources.api | nindent 12 }}
 ---
@@ -265,6 +277,7 @@ spec:
         - name: web
           image: "{{ .Values.images.web.repository }}:{{ .Values.images.web.tag }}"
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          command: ["node", "apps/factory-web/dist/main.js"]
           ports:
             - containerPort: {{ .Values.service.web.port }}
           env:
@@ -313,6 +326,7 @@ spec:
         - name: controller
           image: "{{ .Values.images.controller.repository }}:{{ .Values.images.controller.tag }}"
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          command: ["node", "apps/factory-runner-controller/dist/main.js"]
           env:
             - name: REDIS_URL
               value: "redis://redis.{{ include "factory.namespace" . }}.svc.cluster.local:6379"
@@ -326,6 +340,16 @@ spec:
               value: "http://minio.{{ include "factory.namespace" . }}.svc.cluster.local:9000"
             - name: MINIO_BUCKET
               value: {{ .Values.minio.bucket | quote }}
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-auth
+                  key: MINIO_ROOT_USER
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-auth
+                  key: MINIO_ROOT_PASSWORD
           resources:
             {{- toYaml .Values.resources.controller | nindent 12 }}
 ---

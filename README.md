@@ -28,6 +28,8 @@ codeagent> Implement Attractor as described by https://github.com/strongdm/attra
 - `packages/shared-k8s`: Kubernetes helper logic and secret env projections
 - `deploy/helm/factory-system`: OrbStack-focused Helm chart
 - `prisma/`: Postgres schema + initial migration
+- `factory/self-bootstrap.dot`: baseline self-factory pipeline definition
+- `scripts/`: local image build, OrbStack deploy, and self-bootstrap helpers
 
 ## Local Setup
 
@@ -45,6 +47,28 @@ npm run dev:api
 npm run dev:web
 npm run dev:controller
 npm run dev:runner
+```
+
+## Local OrbStack Bootstrap
+
+Build local images:
+
+```bash
+npm run images:build:local
+```
+
+Deploy stack to OrbStack Kubernetes:
+
+```bash
+npm run k8s:deploy:local
+```
+
+## Self-Bootstrap Run
+
+After API is reachable (port-forward or ingress), bootstrap the repo and queue a planning run:
+
+```bash
+API_BASE_URL=http://localhost:8080 npm run bootstrap:self
 ```
 
 ## LLM Runtime
@@ -65,11 +89,13 @@ Implemented endpoints:
 - `GET /api/models?provider=<provider>`
 - `POST /api/projects`
 - `GET /api/projects`
+- `POST /api/bootstrap/self`
 - `POST /api/projects/{projectId}/repo/connect/github`
 - `POST /api/projects/{projectId}/secrets`
 - `GET /api/projects/{projectId}/secrets`
 - `POST /api/projects/{projectId}/attractors`
 - `GET /api/projects/{projectId}/attractors`
+- `GET /api/projects/{projectId}/runs`
 - `POST /api/runs`
 - `GET /api/runs/{runId}`
 - `GET /api/runs/{runId}/events` (SSE)
