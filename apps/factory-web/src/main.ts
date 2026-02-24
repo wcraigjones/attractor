@@ -154,6 +154,29 @@ app.get("/", (_req, res) => {
         </label>
       </section>
 
+      <section class="card span-4">
+        <h2>Project Secret</h2>
+        <label>Secret Name
+          <input id="secretName" value="llm-anthropic" />
+        </label>
+        <label>Provider
+          <input id="secretProvider" value="anthropic" />
+        </label>
+        <div class="row">
+          <label>Logical Key
+            <input id="secretLogicalKey" value="apiKey" />
+          </label>
+          <label>Secret Key
+            <input id="secretKey" value="anthropic_api_key" />
+          </label>
+        </div>
+        <label>Secret Value
+          <input id="secretValue" type="password" placeholder="paste provider API key" />
+        </label>
+        <button id="upsertSecret">Save Secret</button>
+        <button id="loadSecrets" class="secondary">Load Secrets</button>
+      </section>
+
       <section class="card span-8">
         <h2>Create Run</h2>
         <div class="row">
@@ -218,6 +241,11 @@ app.get("/", (_req, res) => {
       const projectSelect = document.getElementById('projectSelect');
       const attractorSelect = document.getElementById('attractorSelect');
       const runIdInput = document.getElementById('runId');
+      const secretNameInput = document.getElementById('secretName');
+      const secretProviderInput = document.getElementById('secretProvider');
+      const secretLogicalKeyInput = document.getElementById('secretLogicalKey');
+      const secretKeyInput = document.getElementById('secretKey');
+      const secretValueInput = document.getElementById('secretValue');
 
       let eventSource = null;
 
@@ -290,6 +318,14 @@ app.get("/", (_req, res) => {
         log(payload);
       }
 
+      async function loadProjectSecrets() {
+        if (!projectSelect.value) {
+          throw new Error('Select project first');
+        }
+        const payload = await api('/api/projects/' + projectSelect.value + '/secrets');
+        log(payload);
+      }
+
       document.getElementById('bootstrapSelf').addEventListener('click', async () => {
         try {
           const payload = await api('/api/bootstrap/self', {
@@ -323,6 +359,47 @@ app.get("/", (_req, res) => {
 
       document.getElementById('refreshAttractors').addEventListener('click', async () => {
         try { await refreshAttractors(); } catch (error) { log(String(error)); }
+      });
+
+      document.getElementById('upsertSecret').addEventListener('click', async () => {
+        try {
+          if (!projectSelect.value) {
+            throw new Error('Project is required');
+          }
+          if (!secretValueInput.value) {
+            throw new Error('Secret value is required');
+          }
+
+          const logicalKey = secretLogicalKeyInput.value.trim();
+          const secretKey = secretKeyInput.value.trim();
+          const provider = secretProviderInput.value.trim();
+          if (!logicalKey || !secretKey || !provider) {
+            throw new Error('Provider, logical key, and secret key are required');
+          }
+
+          const payload = await api('/api/projects/' + projectSelect.value + '/secrets', {
+            method: 'POST',
+            body: JSON.stringify({
+              name: secretNameInput.value.trim(),
+              provider,
+              keyMappings: {
+                [logicalKey]: secretKey
+              },
+              values: {
+                [secretKey]: secretValueInput.value
+              }
+            })
+          });
+
+          secretValueInput.value = '';
+          log(payload);
+        } catch (error) {
+          log(String(error));
+        }
+      });
+
+      document.getElementById('loadSecrets').addEventListener('click', async () => {
+        try { await loadProjectSecrets(); } catch (error) { log(String(error)); }
       });
 
       document.getElementById('createRun').addEventListener('click', async () => {

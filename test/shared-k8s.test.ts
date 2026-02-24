@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { buildRunnerJobManifest, materializeProviderSecretEnv, toProjectNamespace } from "../packages/shared-k8s/src/index.ts";
+import {
+  buildRunnerJobManifest,
+  getProviderSecretSchema,
+  listProviderSecretSchemas,
+  materializeProviderSecretEnv,
+  toProjectNamespace
+} from "../packages/shared-k8s/src/index.ts";
 
 describe("shared k8s helpers", () => {
   it("builds project namespaces with stable prefix", () => {
@@ -26,6 +32,16 @@ describe("shared k8s helpers", () => {
         }
       }
     ]);
+  });
+
+  it("returns provider secret schemas for UI/bootstrap tooling", () => {
+    const schemas = listProviderSecretSchemas();
+    expect(schemas.length).toBeGreaterThan(0);
+
+    const anthropic = getProviderSecretSchema("anthropic");
+    expect(anthropic).toBeTruthy();
+    expect(anthropic?.requiredAny).toContain("apiKey");
+    expect(anthropic?.envByLogicalKey.oauthToken).toBe("ANTHROPIC_OAUTH_TOKEN");
   });
 
   it("adds minio credentials and execution spec to runner job", () => {

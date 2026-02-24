@@ -14,6 +14,13 @@ interface ProviderEnvSpec {
   requiredAny?: string[];
 }
 
+export interface ProviderSecretSchema {
+  provider: string;
+  envByLogicalKey: Record<string, string>;
+  requiredAll?: string[];
+  requiredAny?: string[];
+}
+
 const providerSpecs: Record<string, ProviderEnvSpec> = {
   openai: {
     envByLogicalKey: {
@@ -69,6 +76,29 @@ function ensureSpec(provider: string): ProviderEnvSpec {
     throw new Error(`Unsupported provider secret mapping: ${provider}`);
   }
   return spec;
+}
+
+function toProviderSecretSchema(provider: string, spec: ProviderEnvSpec): ProviderSecretSchema {
+  return {
+    provider,
+    envByLogicalKey: { ...spec.envByLogicalKey },
+    ...(spec.requiredAll ? { requiredAll: [...spec.requiredAll] } : {}),
+    ...(spec.requiredAny ? { requiredAny: [...spec.requiredAny] } : {})
+  };
+}
+
+export function listProviderSecretSchemas(): ProviderSecretSchema[] {
+  return Object.entries(providerSpecs)
+    .map(([provider, spec]) => toProviderSecretSchema(provider, spec))
+    .sort((a, b) => a.provider.localeCompare(b.provider));
+}
+
+export function getProviderSecretSchema(provider: string): ProviderSecretSchema | null {
+  const spec = providerSpecs[provider];
+  if (!spec) {
+    return null;
+  }
+  return toProviderSecretSchema(provider, spec);
 }
 
 export function toProjectNamespace(name: string): string {

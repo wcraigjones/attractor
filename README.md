@@ -71,6 +71,26 @@ After API is reachable (port-forward or ingress), bootstrap the repo and queue a
 API_BASE_URL=http://localhost:8080 npm run bootstrap:self
 ```
 
+Set provider credentials for the project (required before runs can dispatch):
+
+```bash
+PROJECT_ID=<project-id> \
+PROVIDER=anthropic \
+ANTHROPIC_API_KEY=<key> \
+API_BASE_URL=http://localhost:8080 \
+npm run set:provider-secret
+```
+
+You can also bootstrap and set the provider secret in one command:
+
+```bash
+SET_PROVIDER_SECRET=true \
+MODEL_PROVIDER=anthropic \
+ANTHROPIC_API_KEY=<key> \
+API_BASE_URL=http://localhost:8080 \
+npm run bootstrap:self
+```
+
 Queue an implementation run from the latest successful planning bundle:
 
 ```bash
@@ -93,6 +113,8 @@ Implemented endpoints:
 
 - `GET /api/models/providers`
 - `GET /api/models?provider=<provider>`
+- `GET /api/secrets/providers`
+- `GET /api/secrets/providers/{provider}`
 - `POST /api/projects`
 - `GET /api/projects`
 - `POST /api/bootstrap/self`
@@ -129,7 +151,7 @@ Install to OrbStack:
 
 ```bash
 helm upgrade --install factory-system ./deploy/helm/factory-system \
-  --namespace factory-system --create-namespace \
+  --namespace factory-system \
   -f ./deploy/helm/factory-system/values.local-orbstack.yaml
 ```
 

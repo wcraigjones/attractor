@@ -9,6 +9,8 @@ MODEL_PROVIDER="${MODEL_PROVIDER:-anthropic}"
 MODEL_ID="${MODEL_ID:-claude-sonnet-4-20250514}"
 REASONING_LEVEL="${REASONING_LEVEL:-high}"
 TARGET_BRANCH="${TARGET_BRANCH:-attractor/self-factory}"
+SET_PROVIDER_SECRET="${SET_PROVIDER_SECRET:-false}"
+SECRET_NAME="${SECRET_NAME:-llm-${MODEL_PROVIDER}}"
 
 bootstrap_payload=$(cat <<JSON
 {
@@ -28,6 +30,17 @@ echo "$bootstrap_response"
 
 project_id=$(node -e 'const d=JSON.parse(process.argv[1]); console.log(d.project.id)' "$bootstrap_response")
 attractor_id=$(node -e 'const d=JSON.parse(process.argv[1]); console.log(d.attractor.id)' "$bootstrap_response")
+
+if [[ "$SET_PROVIDER_SECRET" == "true" ]]; then
+  secret_response=$(API_BASE_URL="$API_BASE_URL" \
+    PROJECT_ID="$project_id" \
+    PROVIDER="$MODEL_PROVIDER" \
+    SECRET_NAME="$SECRET_NAME" \
+    ./scripts/set-provider-secret.sh)
+
+  echo "Secret response:"
+  echo "$secret_response"
+fi
 
 run_payload=$(cat <<JSON
 {

@@ -12,7 +12,12 @@ import {
   runQueueKey,
   type RunModelConfig
 } from "@attractor/shared-types";
-import { toProjectNamespace } from "@attractor/shared-k8s";
+import {
+  getProviderSecretSchema,
+  listProviderSecretSchemas,
+  materializeProviderSecretEnv,
+  toProjectNamespace
+} from "@attractor/shared-k8s";
 
 const prisma = new PrismaClient();
 const redis = new Redis(process.env.REDIS_URL ?? "redis://127.0.0.1:6379");
@@ -172,6 +177,18 @@ app.get("/api/models", (req, res) => {
   res.json({ provider, models });
 });
 
+app.get("/api/secrets/providers", (_req, res) => {
+  res.json({ providers: listProviderSecretSchemas() });
+});
+
+app.get("/api/secrets/providers/:provider", (req, res) => {
+  const schema = getProviderSecretSchema(req.params.provider);
+  if (!schema) {
+    return sendError(res, 404, `Unknown provider secret mapping: ${req.params.provider}`);
+  }
+  res.json(schema);
+});
+
 const createProjectSchema = z.object({
   name: z.string().min(2).max(80),
   namespace: z.string().min(2).max(63).optional()
@@ -310,6 +327,26 @@ app.post("/api/projects/:projectId/secrets", async (req, res) => {
   }
 
   const secretName = input.data.k8sSecretName ?? `factory-secret-${input.data.name.toLowerCase().replace(/[^a-z0-9-]+/g, "-")}`;
+
+  const mappedSecretKeys = new Set(Object.values(input.data.keyMappings));
+  const missingSecretValues = [...mappedSecretKeys].filter((secretKey) => !(secretKey in input.data.values));
+  if (missingSecretValues.length > 0) {
+    return sendError(
+      res,
+      400,
+      `Secret values missing keys referenced by keyMappings: ${missingSecretValues.join(", ")}`
+    );
+  }
+
+  try {
+    materializeProviderSecretEnv({
+      provider: input.data.provider,
+      secretName,
+      keys: input.data.keyMappings
+    });
+  } catch (error) {
+    return sendError(res, 400, error instanceof Error ? error.message : String(error));
+  }
 
   await upsertSecret(project.namespace, secretName, input.data.values);
 
