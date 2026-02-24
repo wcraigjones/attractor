@@ -7,8 +7,12 @@ cd "$ROOT_DIR"
 TAG="${1:-dev}"
 NAMESPACE="${NAMESPACE:-factory-system}"
 
+if ! kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
+  kubectl create namespace "$NAMESPACE"
+fi
+
 helm upgrade --install factory-system ./deploy/helm/factory-system \
-  --namespace "$NAMESPACE" --create-namespace \
+  --namespace "$NAMESPACE" \
   -f ./deploy/helm/factory-system/values.local-orbstack.yaml \
   --set images.api.repository=attractor/factory-api \
   --set images.api.tag="$TAG" \

@@ -165,7 +165,7 @@ export function buildRunnerJobManifest(input: {
               name: "runner",
               image: input.image,
               imagePullPolicy: "IfNotPresent",
-              command: ["node", "apps/factory-runner/dist/main.js"],
+              command: ["node", "apps/factory-runner/dist/apps/factory-runner/src/main.js"],
               env: [
                 { name: "RUN_EXECUTION_SPEC", value: JSON.stringify(input.executionSpec) },
                 { name: "FACTORY_API_BASE_URL", value: input.apiBaseUrl },

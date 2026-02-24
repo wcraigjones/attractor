@@ -174,8 +174,28 @@ async function processRun(runId: string): Promise<void> {
       keys: secret.keyMappings as Record<string, string>
     }));
 
-    const secretEnv = mappings.flatMap((mapping) => materializeProviderSecretEnv(mapping));
     const modelConfig = await modelConfigForRun(run.id);
+    const providerSecretExists = mappings.some((mapping) => mapping.provider === modelConfig.provider);
+    if (!providerSecretExists) {
+      await prisma.run.update({
+        where: { id: run.id },
+        data: {
+          status: RunStatus.FAILED,
+          error: `Missing secret mapping for provider ${modelConfig.provider}`,
+          finishedAt: new Date()
+        }
+      });
+      await appendRunEvent(run.id, "RunRejectedMissingProviderSecret", {
+        runId: run.id,
+        provider: modelConfig.provider
+      });
+      if (branchLockAcquired && run.runType === RunType.implementation) {
+        await redis.del(runLockKey(run.projectId, run.targetBranch));
+      }
+      return;
+    }
+
+    const secretEnv = mappings.flatMap((mapping) => materializeProviderSecretEnv(mapping));
 
     const executionSpec: RunExecutionSpec = {
       runId: run.id,

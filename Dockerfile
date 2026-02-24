@@ -2,6 +2,10 @@ FROM node:22-bookworm-slim
 
 WORKDIR /workspace
 
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends git openssl ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
 COPY package.json package-lock.json ./
 COPY apps/factory-api/package.json apps/factory-api/package.json
 COPY apps/factory-web/package.json apps/factory-web/package.json

@@ -287,7 +287,7 @@ spec:
           image: "{{ .Values.images.api.repository }}:{{ .Values.images.api.tag }}"
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
           command: ["sh", "-lc"]
-          args: ["npm run prisma:migrate:deploy && node apps/factory-api/dist/main.js"]
+          args: ["npm run prisma:migrate:deploy && node apps/factory-api/dist/apps/factory-api/src/main.js"]
           ports:
             - containerPort: {{ .Values.service.api.port }}
           env:
@@ -402,7 +402,7 @@ spec:
         - name: controller
           image: "{{ .Values.images.controller.repository }}:{{ .Values.images.controller.tag }}"
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
-          command: ["node", "apps/factory-runner-controller/dist/main.js"]
+          command: ["node", "apps/factory-runner-controller/dist/apps/factory-runner-controller/src/main.js"]
           env:
             - name: REDIS_URL
               value: "redis://redis.{{ include "factory.namespace" . }}.svc.cluster.local:6379"

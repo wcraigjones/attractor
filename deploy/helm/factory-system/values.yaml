@@ -1,4 +1,4 @@
-createNamespace: true
+createNamespace: false
 namespace: factory-system
 
 global:
