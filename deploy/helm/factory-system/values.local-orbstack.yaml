@@ -1,0 +1,19 @@
+namespace: factory-system
+ingress:
+  enabled: true
+  className: ""
+  hostApi: api.attractor.local
+  hostWeb: attractor.local
+images:
+  api:
+    repository: ghcr.io/wcraigjones/attractor-factory-api
+    tag: latest
+  web:
+    repository: ghcr.io/wcraigjones/attractor-factory-web
+    tag: latest
+  controller:
+    repository: ghcr.io/wcraigjones/attractor-factory-runner-controller
+    tag: latest
+  runner:
+    repository: ghcr.io/wcraigjones/attractor-factory-runner
+    tag: latest

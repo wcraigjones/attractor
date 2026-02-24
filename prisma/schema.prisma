@@ -1,0 +1,124 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum RunType {
+  planning
+  implementation
+}
+
+enum RunStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELED
+  TIMEOUT
+}
+
+model Project {
+  id                   String         @id @default(cuid())
+  name                 String
+  namespace            String         @unique
+  githubInstallationId String?
+  repoFullName         String?
+  defaultBranch        String?
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @updatedAt
+  secrets              ProjectSecret[]
+  attractors           AttractorDef[]
+  runs                 Run[]
+}
+
+model ProjectSecret {
+  id            String   @id @default(cuid())
+  projectId     String
+  name          String
+  provider      String
+  k8sSecretName String
+  keyMappings   Json
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, name])
+}
+
+model AttractorDef {
+  id             String   @id @default(cuid())
+  projectId      String
+  name           String
+  repoPath       String
+  defaultRunType RunType
+  description    String?
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  project        Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  runs           Run[]
+
+  @@unique([projectId, name])
+}
+
+model Run {
+  id            String      @id @default(cuid())
+  projectId     String
+  attractorDefId String
+  runType       RunType
+  sourceBranch  String
+  targetBranch  String
+  status        RunStatus   @default(QUEUED)
+  specBundleId  String?
+  prUrl         String?
+  error         String?
+  createdAt     DateTime    @default(now())
+  startedAt     DateTime?
+  finishedAt    DateTime?
+  project       Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  attractorDef  AttractorDef @relation(fields: [attractorDefId], references: [id], onDelete: Cascade)
+  events        RunEvent[]
+  artifacts     Artifact[]
+  producedSpecBundle SpecBundle? @relation("ProducedSpecBundle")
+  referencedSpecBundle SpecBundle? @relation("ReferencedSpecBundle", fields: [specBundleId], references: [id], onDelete: SetNull)
+
+  @@index([projectId, status])
+  @@index([projectId, targetBranch, runType, status])
+}
+
+model SpecBundle {
+  id           String   @id @default(cuid())
+  runId        String   @unique
+  schemaVersion String
+  manifestPath String
+  createdAt    DateTime @default(now())
+  run          Run      @relation("ProducedSpecBundle", fields: [runId], references: [id], onDelete: Cascade)
+  referencedBy Run[]    @relation("ReferencedSpecBundle")
+}
+
+model Artifact {
+  id        String   @id @default(cuid())
+  runId      String
+  key       String
+  path      String
+  createdAt DateTime @default(now())
+  run       Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId])
+  @@unique([runId, key])
+}
+
+model RunEvent {
+  id      String   @id @default(cuid())
+  runId    String
+  ts      DateTime @default(now())
+  type    String
+  payload Json
+  run     Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId, ts])
+}

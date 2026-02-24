@@ -1,0 +1,75 @@
+createNamespace: true
+namespace: factory-system
+
+global:
+  imagePullPolicy: IfNotPresent
+
+images:
+  api:
+    repository: ghcr.io/wcraigjones/attractor-factory-api
+    tag: latest
+  web:
+    repository: ghcr.io/wcraigjones/attractor-factory-web
+    tag: latest
+  controller:
+    repository: ghcr.io/wcraigjones/attractor-factory-runner-controller
+    tag: latest
+  runner:
+    repository: ghcr.io/wcraigjones/attractor-factory-runner
+    tag: latest
+  postgres:
+    repository: postgres
+    tag: "16"
+  redis:
+    repository: redis
+    tag: "7"
+  minio:
+    repository: minio/minio
+    tag: RELEASE.2025-07-23T15-54-02Z
+
+service:
+  api:
+    port: 8080
+  web:
+    port: 3000
+
+ingress:
+  enabled: true
+  className: ""
+  hostApi: api.attractor.local
+  hostWeb: attractor.local
+
+postgres:
+  user: postgres
+  password: postgres
+  database: factory
+  storage: 10Gi
+
+redis:
+  storage: 2Gi
+
+minio:
+  accessKey: minioadmin
+  secretKey: minioadmin
+  bucket: factory-artifacts
+  storage: 20Gi
+
+resources:
+  api:
+    requests: { cpu: 200m, memory: 256Mi }
+    limits: { cpu: 1, memory: 1Gi }
+  web:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+  controller:
+    requests: { cpu: 200m, memory: 256Mi }
+    limits: { cpu: 1, memory: 1Gi }
+  postgres:
+    requests: { cpu: 200m, memory: 512Mi }
+    limits: { cpu: 1, memory: 2Gi }
+  redis:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+  minio:
+    requests: { cpu: 200m, memory: 256Mi }
+    limits: { cpu: 1, memory: 1Gi }

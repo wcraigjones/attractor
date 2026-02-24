@@ -1,0 +1,365 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-auth
+  namespace: {{ include "factory.namespace" . }}
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  POSTGRES_USER: {{ .Values.postgres.user | quote }}
+  POSTGRES_PASSWORD: {{ .Values.postgres.password | quote }}
+  POSTGRES_DB: {{ .Values.postgres.database | quote }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio-auth
+  namespace: {{ include "factory.namespace" . }}
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  MINIO_ROOT_USER: {{ .Values.minio.accessKey | quote }}
+  MINIO_ROOT_PASSWORD: {{ .Values.minio.secretKey | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: {{ include "factory.namespace" . }}
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+spec:
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgres
+  selector:
+    app.kubernetes.io/name: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: {{ include "factory.namespace" . }}
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+    app.kubernetes.io/name: postgres
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres
+        {{- include "factory.labels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: postgres
+          image: "{{ .Values.images.postgres.repository }}:{{ .Values.images.postgres.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: postgres-auth
+          resources:
+            {{- toYaml .Values.resources.postgres | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ .Values.postgres.storage }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: {{ include "factory.namespace" . }}
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+spec:
+  ports:
+    - port: 6379
+      targetPort: 6379
+      name: redis
+  selector:
+    app.kubernetes.io/name: redis
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: {{ include "factory.namespace" . }}
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+    app.kubernetes.io/name: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redis
+        {{- include "factory.labels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: redis
+          image: "{{ .Values.images.redis.repository }}:{{ .Values.images.redis.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 6379
+          args: ["--appendonly", "yes"]
+          resources:
+            {{- toYaml .Values.resources.redis | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: {{ include "factory.namespace" . }}
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+spec:
+  ports:
+    - port: 9000
+      targetPort: 9000
+      name: api
+    - port: 9001
+      targetPort: 9001
+      name: console
+  selector:
+    app.kubernetes.io/name: minio
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: minio
+  namespace: {{ include "factory.namespace" . }}
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+    app.kubernetes.io/name: minio
+spec:
+  serviceName: minio
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: minio
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minio
+        {{- include "factory.labels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: minio
+          image: "{{ .Values.images.minio.repository }}:{{ .Values.images.minio.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          args: ["server", "/data", "--console-address", ":9001"]
+          ports:
+            - containerPort: 9000
+            - containerPort: 9001
+          envFrom:
+            - secretRef:
+                name: minio-auth
+          resources:
+            {{- toYaml .Values.resources.minio | nindent 12 }}
+          volumeMounts:
+            - mountPath: /data
+              name: data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ .Values.minio.storage }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: factory-api
+  namespace: {{ include "factory.namespace" . }}
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+    app.kubernetes.io/name: factory-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: factory-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: factory-api
+        {{- include "factory.labels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: api
+          image: "{{ .Values.images.api.repository }}:{{ .Values.images.api.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: {{ .Values.service.api.port }}
+          env:
+            - name: PORT
+              value: {{ .Values.service.api.port | quote }}
+            - name: REDIS_URL
+              value: "redis://redis.{{ include "factory.namespace" . }}.svc.cluster.local:6379"
+            - name: DATABASE_URL
+              value: "postgresql://{{ .Values.postgres.user }}:{{ .Values.postgres.password }}@postgres.{{ include "factory.namespace" . }}.svc.cluster.local:5432/{{ .Values.postgres.database }}"
+            - name: RUNNER_IMAGE
+              value: "{{ .Values.images.runner.repository }}:{{ .Values.images.runner.tag }}"
+            - name: MINIO_BUCKET
+              value: {{ .Values.minio.bucket | quote }}
+          resources:
+            {{- toYaml .Values.resources.api | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: factory-api
+  namespace: {{ include "factory.namespace" . }}
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: factory-api
+  ports:
+    - name: http
+      port: {{ .Values.service.api.port }}
+      targetPort: {{ .Values.service.api.port }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: factory-web
+  namespace: {{ include "factory.namespace" . }}
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+    app.kubernetes.io/name: factory-web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: factory-web
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: factory-web
+        {{- include "factory.labels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: web
+          image: "{{ .Values.images.web.repository }}:{{ .Values.images.web.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: {{ .Values.service.web.port }}
+          env:
+            - name: PORT
+              value: {{ .Values.service.web.port | quote }}
+            - name: API_BASE_URL
+              value: "http://factory-api.{{ include "factory.namespace" . }}.svc.cluster.local:{{ .Values.service.api.port }}"
+          resources:
+            {{- toYaml .Values.resources.web | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: factory-web
+  namespace: {{ include "factory.namespace" . }}
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: factory-web
+  ports:
+    - name: http
+      port: {{ .Values.service.web.port }}
+      targetPort: {{ .Values.service.web.port }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: factory-runner-controller
+  namespace: {{ include "factory.namespace" . }}
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+    app.kubernetes.io/name: factory-runner-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: factory-runner-controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: factory-runner-controller
+        {{- include "factory.labels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: controller
+          image: "{{ .Values.images.controller.repository }}:{{ .Values.images.controller.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          env:
+            - name: REDIS_URL
+              value: "redis://redis.{{ include "factory.namespace" . }}.svc.cluster.local:6379"
+            - name: DATABASE_URL
+              value: "postgresql://{{ .Values.postgres.user }}:{{ .Values.postgres.password }}@postgres.{{ include "factory.namespace" . }}.svc.cluster.local:5432/{{ .Values.postgres.database }}"
+            - name: RUNNER_IMAGE
+              value: "{{ .Values.images.runner.repository }}:{{ .Values.images.runner.tag }}"
+            - name: FACTORY_API_BASE_URL
+              value: "http://factory-api.{{ include "factory.namespace" . }}.svc.cluster.local:{{ .Values.service.api.port }}"
+            - name: MINIO_ENDPOINT
+              value: "http://minio.{{ include "factory.namespace" . }}.svc.cluster.local:9000"
+            - name: MINIO_BUCKET
+              value: {{ .Values.minio.bucket | quote }}
+          resources:
+            {{- toYaml .Values.resources.controller | nindent 12 }}
+---
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: factory-system
+  namespace: {{ include "factory.namespace" . }}
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.hostWeb }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: factory-web
+                port:
+                  number: {{ .Values.service.web.port }}
+    - host: {{ .Values.ingress.hostApi }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: factory-api
+                port:
+                  number: {{ .Values.service.api.port }}
+{{- end }}

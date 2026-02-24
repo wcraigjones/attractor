@@ -1,11 +1,15 @@
 {
   "name": "attractor",
   "private": true,
-  "version": "0.1.0",
-  "description": "Work-in-progress Attractor implementation based on the Attractor NL specs.",
+  "version": "0.2.0",
+  "description": "Attractor factory monorepo with local Kubernetes control plane and runner services.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "files": [
     "dist",
     "README.md",
@@ -14,25 +18,46 @@
     "unified-llm-spec.md"
   ],
   "scripts": {
-    "clean": "rm -rf dist coverage",
-    "build": "tsc -p tsconfig.json",
-    "check-types": "tsc -p tsconfig.json --noEmit",
+    "clean": "rm -rf dist coverage && npm run clean --workspaces --if-present",
+    "build": "npm run build:root && npm run build --workspaces --if-present",
+    "build:root": "tsc -p tsconfig.json",
+    "check-types": "npm run check-types:root && npm run check-types --workspaces --if-present",
+    "check-types:root": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:all": "npm run test && npm run test --workspaces --if-present",
     "dev": "tsx watch src/index.ts",
-    "dev:api": "tsx watch src/api/main.ts",
-    "start:api": "node dist/api/main.js"
+    "dev:api": "npm --workspace @attractor/factory-api run dev",
+    "dev:web": "npm --workspace @attractor/factory-web run dev",
+    "dev:controller": "npm --workspace @attractor/factory-runner-controller run dev",
+    "dev:runner": "npm --workspace @attractor/factory-runner run dev",
+    "start:api": "npm --workspace @attractor/factory-api run start",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate:dev": "prisma migrate dev",
+    "prisma:migrate:deploy": "prisma migrate deploy",
+    "phase0:helm:template": "helm template factory-system deploy/helm/factory-system -f deploy/helm/factory-system/values.local-orbstack.yaml"
   },
   "engines": {
     "node": ">=20.0.0"
   },
   "devDependencies": {
+    "@types/express": "^5.0.3",
     "@types/node": "^24.3.0",
+    "prisma": "^6.16.2",
     "tsx": "^4.20.5",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"
   },
   "dependencies": {
-    "@mariozechner/pi-ai": "0.54.2"
+    "@aws-sdk/client-s3": "^3.888.0",
+    "@kubernetes/client-node": "^1.4.0",
+    "@mariozechner/pi-ai": "0.54.2",
+    "@octokit/app": "^16.1.2",
+    "@octokit/rest": "^22.0.0",
+    "@prisma/client": "^6.16.2",
+    "express": "^5.1.0",
+    "ioredis": "^5.8.1",
+    "uuid": "^13.0.0",
+    "zod": "^4.1.5"
   }
 }
