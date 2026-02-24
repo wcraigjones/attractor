@@ -1,0 +1,34 @@
+{
+  "name": "attractor",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Work-in-progress Attractor implementation based on the Attractor NL specs.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "attractor-spec.md",
+    "coding-agent-loop-spec.md",
+    "unified-llm-spec.md"
+  ],
+  "scripts": {
+    "clean": "rm -rf dist coverage",
+    "build": "tsc -p tsconfig.json",
+    "check-types": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev": "tsx watch src/index.ts"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}
+

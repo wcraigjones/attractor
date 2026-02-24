@@ -18,6 +18,20 @@ Supply the following prompt to a modern coding agent (Claude Code, Codex, OpenCo
 codeagent> Implement Attractor as described by https://github.com/strongdm/attractor
 ```
 
+## Local Setup
+
+```bash
+npm install
+npm run check-types
+npm run test
+```
+
+For iterative work:
+
+```bash
+npm run dev
+```
+
 ## Terminology
 
 - **NLSpec** (Natural Language Spec): a human-readable spec intended to be  directly usable by coding agents to implement/validate behavior.
