@@ -19,7 +19,9 @@
     "check-types": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "dev": "tsx watch src/index.ts"
+    "dev": "tsx watch src/index.ts",
+    "dev:api": "tsx watch src/api/main.ts",
+    "start:api": "node dist/api/main.js"
   },
   "engines": {
     "node": ">=20.0.0"
@@ -29,6 +31,8 @@
     "tsx": "^4.20.5",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"
+  },
+  "dependencies": {
+    "@mariozechner/pi-ai": "0.54.2"
   }
 }
-

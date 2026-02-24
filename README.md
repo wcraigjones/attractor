@@ -32,6 +32,23 @@ For iterative work:
 npm run dev
 ```
 
+## LLM Runtime
+
+Attractor now mandates [`@mariozechner/pi-ai`](https://github.com/badlogic/pi-mono/tree/main/packages/ai) as the only LLM runtime layer for node execution. No direct provider SDK imports are used in source modules.
+
+## API (MVP)
+
+Run the API locally:
+
+```bash
+npm run dev:api
+```
+
+Endpoints:
+
+- `GET /api/models/providers`
+- `GET /api/models?provider=<provider>`
+
 ## Terminology
 
 - **NLSpec** (Natural Language Spec): a human-readable spec intended to be  directly usable by coding agents to implement/validate behavior.
