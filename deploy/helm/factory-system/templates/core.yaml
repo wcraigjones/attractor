@@ -352,7 +352,7 @@ spec:
         - name: web
           image: "{{ .Values.images.web.repository }}:{{ .Values.images.web.tag }}"
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
-          command: ["node", "apps/factory-web/dist/main.js"]
+          command: ["node", "apps/factory-web/dist/server/main.js"]
           ports:
             - containerPort: {{ .Values.service.web.port }}
           env:

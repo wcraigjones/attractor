@@ -1,9 +1,11 @@
 import express from "express";
+import { Readable } from "node:stream";
 import { KubeConfig, CoreV1Api } from "@kubernetes/client-node";
 import { App as GitHubApp } from "@octokit/app";
 import { PrismaClient, RunStatus, RunType } from "@prisma/client";
 import { Redis } from "ioredis";
 import { getModels, getProviders } from "@mariozechner/pi-ai";
+import { GetObjectCommand, HeadObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { z } from "zod";
 import {
   runCancelKey,
@@ -18,6 +20,7 @@ import {
   materializeProviderSecretEnv,
   toProjectNamespace
 } from "@attractor/shared-k8s";
+import { clampPreviewBytes, isProbablyText, isTextByMetadata } from "./artifact-preview.js";
 
 const prisma = new PrismaClient();
 const redis = new Redis(process.env.REDIS_URL ?? "redis://127.0.0.1:6379");
@@ -41,6 +44,44 @@ const RUNNER_DEFAULT_IMAGE =
   process.env.RUNNER_IMAGE ?? "ghcr.io/wcraigjones/attractor-runner:latest";
 const GLOBAL_SECRET_NAMESPACE =
   process.env.GLOBAL_SECRET_NAMESPACE ?? process.env.FACTORY_SYSTEM_NAMESPACE ?? "factory-system";
+const MINIO_BUCKET = process.env.MINIO_BUCKET ?? "factory-artifacts";
+
+const minioClient = new S3Client({
+  region: "us-east-1",
+  endpoint: process.env.MINIO_ENDPOINT ?? "http://minio:9000",
+  forcePathStyle: true,
+  credentials: {
+    accessKeyId: process.env.MINIO_ACCESS_KEY ?? "minioadmin",
+    secretAccessKey: process.env.MINIO_SECRET_KEY ?? "minioadmin"
+  }
+});
+
+async function bodyToBuffer(body: unknown): Promise<Buffer> {
+  const maybeTransform = body as { transformToByteArray?: () => Promise<Uint8Array> };
+  if (typeof maybeTransform?.transformToByteArray === "function") {
+    const bytes = await maybeTransform.transformToByteArray();
+    return Buffer.from(bytes);
+  }
+
+  if (body instanceof Readable) {
+    const chunks: Buffer[] = [];
+    for await (const chunk of body) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks);
+  }
+
+  throw new Error("Unsupported S3 object body stream");
+}
+
+async function getArtifactByRun(runId: string, artifactId: string) {
+  return prisma.artifact.findFirst({
+    where: {
+      id: artifactId,
+      runId
+    }
+  });
+}
 
 function hasProvider(provider: string): boolean {
   return getProviders().includes(provider as never);
@@ -861,6 +902,91 @@ app.get("/api/runs/:runId/artifacts", async (req, res) => {
 
   const specBundle = await prisma.specBundle.findFirst({ where: { runId: req.params.runId } });
   res.json({ artifacts, specBundle });
+});
+
+app.get("/api/runs/:runId/artifacts/:artifactId/content", async (req, res) => {
+  const artifact = await getArtifactByRun(req.params.runId, req.params.artifactId);
+  if (!artifact) {
+    return sendError(res, 404, "artifact not found for run");
+  }
+
+  const previewBytes = clampPreviewBytes(req.query.previewBytes);
+  const head = await minioClient.send(
+    new HeadObjectCommand({
+      Bucket: MINIO_BUCKET,
+      Key: artifact.path
+    })
+  );
+  const contentLength = Number(head.ContentLength ?? 0);
+  const contentType = head.ContentType ?? artifact.contentType ?? undefined;
+
+  const preview = await minioClient.send(
+    new GetObjectCommand({
+      Bucket: MINIO_BUCKET,
+      Key: artifact.path,
+      Range: `bytes=0-${previewBytes - 1}`
+    })
+  );
+
+  if (!preview.Body) {
+    throw new Error(`artifact ${artifact.id} has no object body`);
+  }
+
+  const bytes = await bodyToBuffer(preview.Body);
+  const isText = isTextByMetadata(contentType, artifact.key) || isProbablyText(bytes);
+  const truncated = isText ? contentLength > bytes.length : false;
+  const encoding = isText ? "utf-8" : null;
+
+  res.json({
+    artifact: {
+      id: artifact.id,
+      key: artifact.key,
+      path: artifact.path,
+      contentType,
+      sizeBytes: contentLength || artifact.sizeBytes || undefined
+    },
+    content: isText ? bytes.toString("utf8") : null,
+    truncated,
+    bytesRead: bytes.length,
+    encoding
+  });
+});
+
+app.get("/api/runs/:runId/artifacts/:artifactId/download", async (req, res) => {
+  const artifact = await getArtifactByRun(req.params.runId, req.params.artifactId);
+  if (!artifact) {
+    return sendError(res, 404, "artifact not found for run");
+  }
+
+  const output = await minioClient.send(
+    new GetObjectCommand({
+      Bucket: MINIO_BUCKET,
+      Key: artifact.path
+    })
+  );
+
+  if (!output.Body) {
+    throw new Error(`artifact ${artifact.id} has no object body`);
+  }
+
+  const contentType = output.ContentType ?? artifact.contentType ?? "application/octet-stream";
+  const contentLength = Number(output.ContentLength ?? artifact.sizeBytes ?? 0);
+  const filename = artifact.key.replace(/"/g, "");
+
+  res.setHeader("content-type", contentType);
+  if (contentLength > 0) {
+    res.setHeader("content-length", String(contentLength));
+  }
+  res.setHeader("content-disposition", `attachment; filename="${filename}"`);
+
+  const body = output.Body;
+  if (body instanceof Readable) {
+    body.pipe(res);
+    return;
+  }
+
+  const bytes = await bodyToBuffer(body);
+  res.end(bytes);
 });
 
 app.post("/api/runs/:runId/cancel", async (req, res) => {

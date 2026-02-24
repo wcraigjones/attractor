@@ -21,7 +21,7 @@ codeagent> Implement Attractor as described by https://github.com/strongdm/attra
 ## Monorepo Layout
 
 - `apps/factory-api`: Control-plane API (projects/secrets/attractors/runs, model catalog, SSE events)
-- `apps/factory-web`: Web control surface (MVP shell)
+- `apps/factory-web`: Route-based React control surface (shadcn/ui + Monaco artifact viewer)
 - `apps/factory-runner-controller`: Redis queue consumer that creates Kubernetes Jobs
 - `apps/factory-runner`: Per-run execution worker (planning/implementation baseline)
 - `packages/shared-types`: Shared API/runtime contracts and Redis key conventions
@@ -68,6 +68,17 @@ The deploy script installs Traefik, applies the factory ingress, and prints dire
 Provider API keys are not required to install or open the UI. The factory boots keyless and you add project-scoped provider keys later from the Web UI (`Project Secret` panel).
 
 Global shared secrets are also supported from the Web UI (`Global Secret` panel). Global secrets are replicated into each project namespace, and project secrets override global secrets for the same provider.
+
+Web route map:
+
+- `/`
+- `/projects`
+- `/projects/:projectId`
+- `/projects/:projectId/secrets`
+- `/projects/:projectId/attractors`
+- `/projects/:projectId/runs`
+- `/runs/:runId`
+- `/runs/:runId/artifacts/:artifactId`
 
 ## Self-Bootstrap Run
 
@@ -150,6 +161,8 @@ Implemented endpoints:
 - `GET /api/runs/{runId}`
 - `GET /api/runs/{runId}/events` (SSE)
 - `GET /api/runs/{runId}/artifacts`
+- `GET /api/runs/{runId}/artifacts/{artifactId}/content`
+- `GET /api/runs/{runId}/artifacts/{artifactId}/download`
 - `POST /api/runs/{runId}/cancel`
 
 ## Prisma

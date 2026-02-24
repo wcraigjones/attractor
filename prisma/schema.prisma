@@ -115,6 +115,8 @@ model Artifact {
   runId      String
   key       String
   path      String
+  contentType String?
+  sizeBytes Int?
   createdAt DateTime @default(now())
   run       Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
 
