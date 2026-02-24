@@ -1,0 +1,23 @@
+digraph ux_redesign_self {
+  rankdir=LR;
+  node [shape=box];
+
+  kickoff [label="UX Redesign: Attractor Factory Web App"];
+  audit [label="Audit current single-page UX and IA pain points"];
+  sitemap [label="Design multi-page IA and navigation model"];
+  flows [label="Define key user flows and page responsibilities"];
+  ui_system [label="Define consistent layout, components, and visual system"];
+  migration [label="Plan technical migration from single page to routes/pages"];
+  milestones [label="Create phased implementation plan with acceptance criteria"];
+
+  kickoff -> audit -> sitemap -> flows -> ui_system -> migration -> milestones;
+
+  // Planning intent for codergen:
+  // Produce a concrete, implementation-ready redesign plan for this repository's
+  // factory-web app with:
+  // 1) information architecture and page map,
+  // 2) route structure and shared shell/nav behavior,
+  // 3) per-page UX requirements and wireframe-level guidance,
+  // 4) component and state-management boundaries,
+  // 5) migration steps that preserve current functionality while improving usability.
+}
