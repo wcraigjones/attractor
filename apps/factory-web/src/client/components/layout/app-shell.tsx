@@ -141,8 +141,11 @@ export function AppShell() {
 
           <div className="flex w-full items-center gap-2 md:w-auto">
             <Select
-              value={selectedProjectId}
+              value={selectedProjectId ?? ""}
               onValueChange={(value) => {
+                if (!value) {
+                  return;
+                }
                 navigate(`/projects/${value}`);
               }}
             >
