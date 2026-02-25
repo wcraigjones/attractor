@@ -4,6 +4,13 @@ import { useQuery } from "@tanstack/react-query";
 
 import { getRun, listProjects } from "../../lib/api";
 import { pathForProjectSelection } from "../../lib/project-routing";
+import {
+  buildScopeOptions,
+  GLOBAL_SCOPE_VALUE,
+  isGlobalSecretsPath,
+  resolveSelectedScope,
+  scopeToPath
+} from "../../lib/scope-selector";
 import { cn } from "../../lib/utils";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 
@@ -37,6 +44,17 @@ export function AppShell() {
     enabled: Boolean(runIdFromPath)
   });
 
+  const scopeOptions = useMemo(() => buildScopeOptions(projectsQuery.data ?? []), [projectsQuery.data]);
+  const selectedScope = resolveSelectedScope({
+    pathname: location.pathname,
+    projectIdFromPath,
+    fallbackProjectId:
+      runContextQuery.data?.projectId ??
+      (runIdFromPath && runContextQuery.isLoading ? undefined : projectsQuery.data?.[0]?.id)
+  });
+  const selectedProjectId = selectedScope === GLOBAL_SCOPE_VALUE ? undefined : selectedScope;
+  const globalScopeSelected = selectedScope === GLOBAL_SCOPE_VALUE;
+
   const breadcrumbs = useMemo(() => {
     const parts = location.pathname.split("/").filter(Boolean);
     const items: Array<{ href: string; label: string }> = [{ href: "/", label: "Dashboard" }];
@@ -49,6 +67,11 @@ export function AppShell() {
     for (let index = 0; index < parts.length; index += 1) {
       const part = parts[index] ?? "";
       cursor += `/${part}`;
+
+      if (part === "secrets" && parts[index + 1] === "global") {
+        items.push({ href: "/secrets/global", label: "Global Secrets" });
+        break;
+      }
 
       if (part === "projects" && index + 1 < parts.length) {
         const projectId = parts[index + 1] ?? "";
@@ -85,28 +108,6 @@ export function AppShell() {
     return items;
   }, [location.pathname, projectsQuery.data, runContextQuery.data?.projectId]);
 
-  const selectedProjectId = useMemo(() => {
-    if (projectIdFromPath) {
-      return projectIdFromPath;
-    }
-
-    if (runContextQuery.data?.projectId) {
-      return runContextQuery.data.projectId;
-    }
-
-    if (runIdFromPath && runContextQuery.isLoading) {
-      return undefined;
-    }
-
-    return projectsQuery.data?.[0]?.id;
-  }, [
-    projectIdFromPath,
-    projectsQuery.data,
-    runContextQuery.data?.projectId,
-    runContextQuery.isLoading,
-    runIdFromPath
-  ]);
-
   return (
     <div className="flex min-h-screen flex-col md:flex-row">
       <aside className="border-b border-border bg-card/90 p-4 backdrop-blur md:min-h-screen md:w-64 md:border-b-0 md:border-r">
@@ -130,7 +131,23 @@ export function AppShell() {
               {item.label}
             </NavLink>
           ))}
-          {selectedProjectId ? (
+          {globalScopeSelected ? (
+            <div className="mt-4 space-y-1 border-t border-border pt-4">
+              <NavLink
+                to="/secrets/global"
+                className={({ isActive }) =>
+                  cn(
+                    "block rounded-md px-3 py-2 text-sm",
+                    isActive || isGlobalSecretsPath(location.pathname)
+                      ? "bg-secondary text-secondary-foreground"
+                      : "text-muted-foreground hover:bg-muted"
+                  )
+                }
+              >
+                Secrets
+              </NavLink>
+            </div>
+          ) : selectedProjectId ? (
             <div className="mt-4 space-y-1 border-t border-border pt-4">
               {[
                 { to: `/projects/${selectedProjectId}`, label: "Overview" },
@@ -178,21 +195,25 @@ export function AppShell() {
 
           <div className="flex w-full items-center gap-2 md:w-auto">
             <Select
-              value={selectedProjectId ?? ""}
+              value={selectedScope ?? ""}
               onValueChange={(value) => {
                 if (!value) {
+                  return;
+                }
+                if (value === GLOBAL_SCOPE_VALUE) {
+                  navigate(scopeToPath(value));
                   return;
                 }
                 navigate(pathForProjectSelection(location.pathname, value));
               }}
             >
               <SelectTrigger className="md:w-72">
-                <SelectValue placeholder="Select project" />
+                <SelectValue placeholder="Select scope" />
               </SelectTrigger>
               <SelectContent>
-                {(projectsQuery.data ?? []).map((project) => (
-                  <SelectItem key={project.id} value={project.id}>
-                    {project.name}
+                {scopeOptions.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
                   </SelectItem>
                 ))}
               </SelectContent>

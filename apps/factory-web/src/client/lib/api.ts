@@ -109,8 +109,8 @@ export async function listGlobalSecrets(): Promise<GlobalSecret[]> {
 
 export async function upsertGlobalSecret(input: {
   name: string;
-  provider: string;
-  keyMappings: Record<string, string>;
+  provider?: string;
+  keyMappings?: Record<string, string>;
   values: Record<string, string>;
 }): Promise<GlobalSecret> {
   return apiRequest<GlobalSecret>("/api/secrets/global", {
@@ -128,8 +128,8 @@ export async function upsertProjectSecret(
   projectId: string,
   input: {
     name: string;
-    provider: string;
-    keyMappings: Record<string, string>;
+    provider?: string;
+    keyMappings?: Record<string, string>;
     values: Record<string, string>;
   }
 ): Promise<ProjectSecret> {

@@ -11,6 +11,7 @@ import {
 } from "@attractor/shared-types";
 import {
   buildRunnerJobManifest,
+  getProviderSecretSchema,
   materializeProviderSecretEnv,
   type ProjectProviderSecretMapping
 } from "@attractor/shared-k8s";
@@ -192,9 +193,10 @@ async function processRun(runId: string): Promise<void> {
       mappingsByProvider.set(mapping.provider, mapping);
     }
     const mappings = [...mappingsByProvider.values()];
+    const providerMappings = mappings.filter((mapping) => getProviderSecretSchema(mapping.provider) !== null);
 
     const modelConfig = await modelConfigForRun(run.id);
-    const providerSecretExists = mappings.some((mapping) => mapping.provider === modelConfig.provider);
+    const providerSecretExists = providerMappings.some((mapping) => mapping.provider === modelConfig.provider);
     if (!providerSecretExists) {
       await prisma.run.update({
         where: { id: run.id },
@@ -214,7 +216,7 @@ async function processRun(runId: string): Promise<void> {
       return;
     }
 
-    const secretEnv = mappings.flatMap((mapping) => materializeProviderSecretEnv(mapping));
+    const secretEnv = providerMappings.flatMap((mapping) => materializeProviderSecretEnv(mapping));
 
     const executionSpec: RunExecutionSpec = {
       runId: run.id,

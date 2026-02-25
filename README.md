@@ -65,14 +65,16 @@ npm run k8s:deploy:local
 
 The deploy script installs Traefik, applies the factory ingress, and prints direct local Web/API URLs (no port-forward required).
 
-Provider API keys are not required to install or open the UI. The factory boots keyless and you add project-scoped provider keys later from the Web UI (`Project Secret` panel).
+Provider API keys are not required to install or open the UI. The factory boots keyless and you add project-scoped provider keys later from the Web UI (`Project Secrets` page).
+The secrets UI and API also support arbitrary key/value secrets that are not tied to an AI provider mapping.
 
-Global shared secrets are also supported from the Web UI (`Global Secret` panel). Global secrets are replicated into each project namespace, and project secrets override global secrets for the same provider.
+Global shared secrets are also supported from the Web UI (`Global Secrets` page). Global secrets are replicated into each project namespace, and project secrets override global secrets for the same provider.
 
 Web route map:
 
 - `/`
 - `/projects`
+- `/secrets/global`
 - `/projects/:projectId`
 - `/projects/:projectId/secrets`
 - `/projects/:projectId/attractors`
@@ -88,9 +90,9 @@ After API is reachable (use the `API URL` printed by `npm run k8s:deploy:local`)
 API_BASE_URL=http://<traefik-ip>/api npm run bootstrap:self
 ```
 
-Preferred: set provider credentials in the UI (`Project Secret` panel) after project bootstrap.
+Preferred: set provider credentials in the UI (`Project Secrets` page) after project bootstrap.
 
-If a key should be shared across projects, set it once in the UI (`Global Secret` panel) and skip per-project setup unless you need project-specific overrides.
+If a key should be shared across projects, set it once in the UI (`Global Secrets` page) and skip per-project setup unless you need project-specific overrides.
 
 CLI fallback: set provider credentials for the project (required before runs can dispatch):
 

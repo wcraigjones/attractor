@@ -428,12 +428,35 @@ app.post("/api/projects/:projectId/repo/connect/github", async (req, res) => {
   res.json(project);
 });
 
+const ARBITRARY_SECRET_PROVIDER = "__arbitrary__";
+
+function normalizeSecretProvider(provider: string | undefined): string {
+  const normalized = (provider ?? "").trim();
+  return normalized.length > 0 ? normalized : ARBITRARY_SECRET_PROVIDER;
+}
+
+function normalizeSecretPayload(input: {
+  provider?: string;
+  keyMappings: Record<string, string>;
+  values: Record<string, string>;
+}): { provider: string; keyMappings: Record<string, string>; values: Record<string, string> } {
+  const provider = normalizeSecretProvider(input.provider);
+  const values = input.values;
+  const keyMappings =
+    Object.keys(input.keyMappings).length > 0
+      ? input.keyMappings
+      : Object.fromEntries(Object.keys(values).map((key) => [key, key]));
+  return { provider, keyMappings, values };
+}
+
 const createSecretSchema = z.object({
   name: z.string().min(1),
-  provider: z.string().min(1),
+  provider: z.string().optional(),
   k8sSecretName: z.string().min(1).optional(),
-  keyMappings: z.record(z.string(), z.string()),
-  values: z.record(z.string(), z.string())
+  keyMappings: z.record(z.string(), z.string()).default({}),
+  values: z.record(z.string(), z.string()).refine((values) => Object.keys(values).length > 0, {
+    message: "values must include at least one key"
+  })
 });
 
 app.post("/api/secrets/global", async (req, res) => {
@@ -442,9 +465,10 @@ app.post("/api/secrets/global", async (req, res) => {
     return sendError(res, 400, input.error.message);
   }
 
+  const normalized = normalizeSecretPayload(input.data);
   const secretName = input.data.k8sSecretName ?? toSecretName("factory-global", input.data.name);
-  const mappedSecretKeys = new Set(Object.values(input.data.keyMappings));
-  const missingSecretValues = [...mappedSecretKeys].filter((secretKey) => !(secretKey in input.data.values));
+  const mappedSecretKeys = new Set(Object.values(normalized.keyMappings));
+  const missingSecretValues = [...mappedSecretKeys].filter((secretKey) => !(secretKey in normalized.values));
   if (missingSecretValues.length > 0) {
     return sendError(
       res,
@@ -453,33 +477,35 @@ app.post("/api/secrets/global", async (req, res) => {
     );
   }
 
-  try {
-    materializeProviderSecretEnv({
-      provider: input.data.provider,
-      secretName,
-      keys: input.data.keyMappings
-    });
-  } catch (error) {
-    return sendError(res, 400, error instanceof Error ? error.message : String(error));
+  if (getProviderSecretSchema(normalized.provider)) {
+    try {
+      materializeProviderSecretEnv({
+        provider: normalized.provider,
+        secretName,
+        keys: normalized.keyMappings
+      });
+    } catch (error) {
+      return sendError(res, 400, error instanceof Error ? error.message : String(error));
+    }
   }
 
-  await upsertSecret(GLOBAL_SECRET_NAMESPACE, secretName, input.data.values);
-  await propagateGlobalSecretToAllProjects(secretName, input.data.values);
+  await upsertSecret(GLOBAL_SECRET_NAMESPACE, secretName, normalized.values);
+  await propagateGlobalSecretToAllProjects(secretName, normalized.values);
 
   const saved = await prisma.globalSecret.upsert({
     where: {
       name: input.data.name
     },
     update: {
-      provider: input.data.provider,
+      provider: normalized.provider,
       k8sSecretName: secretName,
-      keyMappings: input.data.keyMappings
+      keyMappings: normalized.keyMappings
     },
     create: {
       name: input.data.name,
-      provider: input.data.provider,
+      provider: normalized.provider,
       k8sSecretName: secretName,
-      keyMappings: input.data.keyMappings
+      keyMappings: normalized.keyMappings
     }
   });
 
@@ -504,10 +530,11 @@ app.post("/api/projects/:projectId/secrets", async (req, res) => {
     return sendError(res, 404, "project not found");
   }
 
+  const normalized = normalizeSecretPayload(input.data);
   const secretName = input.data.k8sSecretName ?? toSecretName("factory-secret", input.data.name);
 
-  const mappedSecretKeys = new Set(Object.values(input.data.keyMappings));
-  const missingSecretValues = [...mappedSecretKeys].filter((secretKey) => !(secretKey in input.data.values));
+  const mappedSecretKeys = new Set(Object.values(normalized.keyMappings));
+  const missingSecretValues = [...mappedSecretKeys].filter((secretKey) => !(secretKey in normalized.values));
   if (missingSecretValues.length > 0) {
     return sendError(
       res,
@@ -516,17 +543,19 @@ app.post("/api/projects/:projectId/secrets", async (req, res) => {
     );
   }
 
-  try {
-    materializeProviderSecretEnv({
-      provider: input.data.provider,
-      secretName,
-      keys: input.data.keyMappings
-    });
-  } catch (error) {
-    return sendError(res, 400, error instanceof Error ? error.message : String(error));
+  if (getProviderSecretSchema(normalized.provider)) {
+    try {
+      materializeProviderSecretEnv({
+        provider: normalized.provider,
+        secretName,
+        keys: normalized.keyMappings
+      });
+    } catch (error) {
+      return sendError(res, 400, error instanceof Error ? error.message : String(error));
+    }
   }
 
-  await upsertSecret(project.namespace, secretName, input.data.values);
+  await upsertSecret(project.namespace, secretName, normalized.values);
 
   const saved = await prisma.projectSecret.upsert({
     where: {
@@ -536,16 +565,16 @@ app.post("/api/projects/:projectId/secrets", async (req, res) => {
       }
     },
     update: {
-      provider: input.data.provider,
+      provider: normalized.provider,
       k8sSecretName: secretName,
-      keyMappings: input.data.keyMappings
+      keyMappings: normalized.keyMappings
     },
     create: {
       projectId: project.id,
       name: input.data.name,
-      provider: input.data.provider,
+      provider: normalized.provider,
       k8sSecretName: secretName,
-      keyMappings: input.data.keyMappings
+      keyMappings: normalized.keyMappings
     }
   });
 
