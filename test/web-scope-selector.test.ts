@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildScopeOptions,
   GLOBAL_SCOPE_VALUE,
+  isGlobalAttractorsPath,
   resolveSelectedScope,
   scopeToPath
 } from "../apps/factory-web/src/client/lib/scope-selector";
@@ -18,6 +19,13 @@ describe("scope selector helpers", () => {
     expect(resolveSelectedScope({ pathname: "/projects/proj-2/secrets", projectIdFromPath: "proj-2" })).toBe(
       "proj-2"
     );
+  });
+
+  it("resolves /attractors/global path to global scope sentinel", () => {
+    expect(resolveSelectedScope({ pathname: "/attractors/global", fallbackProjectId: "proj-1" })).toBe(
+      GLOBAL_SCOPE_VALUE
+    );
+    expect(isGlobalAttractorsPath("/attractors/global")).toBe(true);
   });
 
   it("builds options with Global as first row", () => {

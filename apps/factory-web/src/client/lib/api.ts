@@ -2,6 +2,7 @@ import type {
   Artifact,
   ArtifactContentResponse,
   AttractorDef,
+  GlobalAttractor,
   GlobalSecret,
   Project,
   ProjectSecret,
@@ -142,6 +143,24 @@ export async function upsertProjectSecret(
 export async function listAttractors(projectId: string): Promise<AttractorDef[]> {
   const payload = await apiRequest<{ attractors: AttractorDef[] }>(`/api/projects/${projectId}/attractors`);
   return payload.attractors;
+}
+
+export async function listGlobalAttractors(): Promise<GlobalAttractor[]> {
+  const payload = await apiRequest<{ attractors: GlobalAttractor[] }>("/api/attractors/global");
+  return payload.attractors;
+}
+
+export async function upsertGlobalAttractor(input: {
+  name: string;
+  repoPath: string;
+  defaultRunType: "planning" | "implementation";
+  description?: string;
+  active?: boolean;
+}): Promise<GlobalAttractor> {
+  return apiRequest<GlobalAttractor>("/api/attractors/global", {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
 }
 
 export async function createAttractor(

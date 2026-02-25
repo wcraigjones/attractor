@@ -9,12 +9,20 @@ export function isGlobalSecretsPath(pathname: string): boolean {
   return pathname === "/secrets/global" || pathname.startsWith("/secrets/global/");
 }
 
+export function isGlobalAttractorsPath(pathname: string): boolean {
+  return pathname === "/attractors/global" || pathname.startsWith("/attractors/global/");
+}
+
+export function isGlobalScopePath(pathname: string): boolean {
+  return isGlobalSecretsPath(pathname) || isGlobalAttractorsPath(pathname);
+}
+
 export function resolveSelectedScope(input: {
   pathname: string;
   projectIdFromPath?: string;
   fallbackProjectId?: string;
 }): string | undefined {
-  if (isGlobalSecretsPath(input.pathname)) {
+  if (isGlobalScopePath(input.pathname)) {
     return GLOBAL_SCOPE_VALUE;
   }
   if (input.projectIdFromPath) {

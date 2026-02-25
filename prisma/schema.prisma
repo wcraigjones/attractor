@@ -21,6 +21,11 @@ enum RunStatus {
   TIMEOUT
 }
 
+enum AttractorScope {
+  PROJECT
+  GLOBAL
+}
+
 model Project {
   id                   String         @id @default(cuid())
   name                 String
@@ -45,6 +50,17 @@ model GlobalSecret {
   updatedAt     DateTime @updatedAt
 }
 
+model GlobalAttractor {
+  id             String   @id @default(cuid())
+  name           String   @unique
+  repoPath       String
+  defaultRunType RunType
+  description    String?
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
 model ProjectSecret {
   id            String   @id @default(cuid())
   projectId     String
@@ -62,6 +78,7 @@ model ProjectSecret {
 model AttractorDef {
   id             String   @id @default(cuid())
   projectId      String
+  scope          AttractorScope @default(PROJECT)
   name           String
   repoPath       String
   defaultRunType RunType
@@ -72,7 +89,7 @@ model AttractorDef {
   project        Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
   runs           Run[]
 
-  @@unique([projectId, name])
+  @@unique([projectId, name, scope])
 }
 
 model Run {

@@ -7,6 +7,7 @@ import { pathForProjectSelection } from "../../lib/project-routing";
 import {
   buildScopeOptions,
   GLOBAL_SCOPE_VALUE,
+  isGlobalAttractorsPath,
   isGlobalSecretsPath,
   resolveSelectedScope,
   scopeToPath
@@ -70,6 +71,11 @@ export function AppShell() {
 
       if (part === "secrets" && parts[index + 1] === "global") {
         items.push({ href: "/secrets/global", label: "Global Secrets" });
+        break;
+      }
+
+      if (part === "attractors" && parts[index + 1] === "global") {
+        items.push({ href: "/attractors/global", label: "Global Attractors" });
         break;
       }
 
@@ -145,6 +151,19 @@ export function AppShell() {
                 }
               >
                 Secrets
+              </NavLink>
+              <NavLink
+                to="/attractors/global"
+                className={({ isActive }) =>
+                  cn(
+                    "block rounded-md px-3 py-2 text-sm",
+                    isActive || isGlobalAttractorsPath(location.pathname)
+                      ? "bg-secondary text-secondary-foreground"
+                      : "text-muted-foreground hover:bg-muted"
+                  )
+                }
+              >
+                Attractors
               </NavLink>
             </div>
           ) : selectedProjectId ? (

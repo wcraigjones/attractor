@@ -1,5 +1,6 @@
 export type RunType = "planning" | "implementation";
 export type RunStatus = "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELED" | "TIMEOUT";
+export type AttractorScope = "PROJECT" | "GLOBAL";
 
 export interface Project {
   id: string;
@@ -36,6 +37,18 @@ export interface GlobalSecret {
 export interface AttractorDef {
   id: string;
   projectId: string;
+  scope: AttractorScope;
+  name: string;
+  repoPath: string;
+  defaultRunType: RunType;
+  description: string | null;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GlobalAttractor {
+  id: string;
   name: string;
   repoPath: string;
   defaultRunType: RunType;

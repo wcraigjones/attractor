@@ -10,6 +10,7 @@ import {
   listProjects,
   listProjectSecrets
 } from "../lib/api";
+import { buildEffectiveAttractors } from "../lib/attractors-view";
 import { PageTitle } from "../components/layout/page-title";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
@@ -45,6 +46,10 @@ export function ProjectOverviewPage() {
   const project = useMemo(
     () => projectsQuery.data?.find((candidate) => candidate.id === projectId),
     [projectsQuery.data, projectId]
+  );
+  const effectiveAttractorCount = useMemo(
+    () => buildEffectiveAttractors(attractorsQuery.data ?? []).length,
+    [attractorsQuery.data]
   );
 
   const connectMutation = useMutation({
@@ -85,7 +90,7 @@ export function ProjectOverviewPage() {
         <Card>
           <CardHeader>
             <CardDescription>Attractors</CardDescription>
-            <CardTitle>{attractorsQuery.data?.length ?? 0}</CardTitle>
+            <CardTitle>{effectiveAttractorCount}</CardTitle>
           </CardHeader>
         </Card>
         <Card>

@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import { createAttractor, listAttractors } from "../lib/api";
+import { buildProjectAttractorsViewRows, type AttractorRowStatus } from "../lib/attractors-view";
 import { PageTitle } from "../components/layout/page-title";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
@@ -13,6 +14,16 @@ import { Label } from "../components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { Textarea } from "../components/ui/textarea";
+
+function statusVariant(status: AttractorRowStatus): "default" | "secondary" | "success" | "warning" {
+  if (status === "Project") {
+    return "default";
+  }
+  if (status === "Inherited") {
+    return "success";
+  }
+  return "warning";
+}
 
 export function ProjectAttractorsPage() {
   const params = useParams<{ projectId: string }>();
@@ -29,6 +40,7 @@ export function ProjectAttractorsPage() {
     queryFn: () => listAttractors(projectId),
     enabled: projectId.length > 0
   });
+  const effectiveRows = buildProjectAttractorsViewRows(attractorsQuery.data ?? []);
 
   const createMutation = useMutation({
     mutationFn: () =>
@@ -52,30 +64,48 @@ export function ProjectAttractorsPage() {
 
   return (
     <div>
-      <PageTitle title="Attractors" description="Register multiple attractor graph files per project." />
+      <PageTitle title="Project Attractors" description="Project attractors can override global attractors by name." />
+
+      <div className="mb-4 flex items-center gap-2">
+        <Badge variant="warning">Override Rule</Badge>
+        <p className="text-sm text-muted-foreground">Global rows are muted when a project attractor uses the same name.</p>
+      </div>
 
       <div className="grid gap-4 lg:grid-cols-[2fr,1fr]">
         <Card>
           <CardHeader>
-            <CardTitle>Attractor Registry</CardTitle>
-            <CardDescription>Paths are repo-relative graph files.</CardDescription>
+            <CardTitle>Effective Attractors</CardTitle>
+            <CardDescription>Project rows first, then inherited global rows.</CardDescription>
           </CardHeader>
           <CardContent>
             <Table>
               <TableHeader>
                 <TableRow>
+                  <TableHead>Source</TableHead>
                   <TableHead>Name</TableHead>
                   <TableHead>Path</TableHead>
                   <TableHead>Default Run</TableHead>
                   <TableHead>Status</TableHead>
+                  <TableHead>Activity</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {(attractorsQuery.data ?? []).map((attractor) => (
-                  <TableRow key={attractor.id}>
+                {effectiveRows.map((attractor) => (
+                  <TableRow
+                    key={attractor.id}
+                    className={attractor.muted ? "bg-muted/20 text-muted-foreground hover:bg-muted/20" : undefined}
+                  >
+                    <TableCell>
+                      <Badge variant={attractor.source === "project" ? "default" : "outline"}>
+                        {attractor.source === "project" ? "Project" : "Global"}
+                      </Badge>
+                    </TableCell>
                     <TableCell>{attractor.name}</TableCell>
                     <TableCell className="mono text-xs">{attractor.repoPath}</TableCell>
                     <TableCell>{attractor.defaultRunType}</TableCell>
+                    <TableCell>
+                      <Badge variant={statusVariant(attractor.status)}>{attractor.status}</Badge>
+                    </TableCell>
                     <TableCell>
                       <Badge variant={attractor.active ? "success" : "secondary"}>
                         {attractor.active ? "Active" : "Inactive"}
@@ -85,6 +115,9 @@ export function ProjectAttractorsPage() {
                 ))}
               </TableBody>
             </Table>
+            {effectiveRows.length === 0 ? (
+              <p className="mt-3 text-sm text-muted-foreground">No project or global attractors have been configured yet.</p>
+            ) : null}
           </CardContent>
         </Card>
 

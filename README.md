@@ -70,10 +70,13 @@ The secrets UI and API also support arbitrary key/value secrets that are not tie
 
 Global shared secrets are also supported from the Web UI (`Global Secrets` page). Global secrets are replicated into each project namespace, and project secrets override global secrets for the same provider.
 
+Global attractors are also supported from the Web UI (`Global Attractors` page). Global attractors are synced into each project, and project attractors with the same name override global attractors in project views and run selection.
+
 Web route map:
 
 - `/`
 - `/projects`
+- `/attractors/global`
 - `/secrets/global`
 - `/projects/:projectId`
 - `/projects/:projectId/secrets`
@@ -149,6 +152,8 @@ Implemented endpoints:
 - `GET /api/secrets/providers/{provider}`
 - `POST /api/secrets/global`
 - `GET /api/secrets/global`
+- `POST /api/attractors/global`
+- `GET /api/attractors/global`
 - `POST /api/projects`
 - `GET /api/projects`
 - `POST /api/bootstrap/self`

@@ -2,7 +2,7 @@ import express from "express";
 import { Readable } from "node:stream";
 import { KubeConfig, CoreV1Api } from "@kubernetes/client-node";
 import { App as GitHubApp } from "@octokit/app";
-import { PrismaClient, RunStatus, RunType } from "@prisma/client";
+import { AttractorScope, PrismaClient, RunStatus, RunType } from "@prisma/client";
 import { Redis } from "ioredis";
 import { getModels, getProviders } from "@mariozechner/pi-ai";
 import { GetObjectCommand, HeadObjectCommand, S3Client } from "@aws-sdk/client-s3";
@@ -213,6 +213,62 @@ async function propagateGlobalSecretToAllProjects(secretName: string, values: Re
   }
 }
 
+async function upsertGlobalAttractorForProject(
+  projectId: string,
+  attractor: {
+    name: string;
+    repoPath: string;
+    defaultRunType: RunType;
+    description: string | null;
+    active: boolean;
+  }
+): Promise<void> {
+  await prisma.attractorDef.upsert({
+    where: {
+      projectId_name_scope: {
+        projectId,
+        name: attractor.name,
+        scope: AttractorScope.GLOBAL
+      }
+    },
+    update: {
+      repoPath: attractor.repoPath,
+      defaultRunType: attractor.defaultRunType,
+      description: attractor.description,
+      active: attractor.active
+    },
+    create: {
+      projectId,
+      scope: AttractorScope.GLOBAL,
+      name: attractor.name,
+      repoPath: attractor.repoPath,
+      defaultRunType: attractor.defaultRunType,
+      description: attractor.description,
+      active: attractor.active
+    }
+  });
+}
+
+async function syncGlobalAttractorsToProject(projectId: string): Promise<void> {
+  const globals = await prisma.globalAttractor.findMany();
+  for (const attractor of globals) {
+    await upsertGlobalAttractorForProject(projectId, attractor);
+  }
+}
+
+async function propagateGlobalAttractorToAllProjects(attractor: {
+  name: string;
+  repoPath: string;
+  defaultRunType: RunType;
+  description: string | null;
+  active: boolean;
+}): Promise<void> {
+  const projects = await prisma.project.findMany({ select: { id: true } });
+  for (const project of projects) {
+    await upsertGlobalAttractorForProject(project.id, attractor);
+  }
+}
+
 async function hasEffectiveProviderSecret(projectId: string, provider: string): Promise<boolean> {
   const [projectSecret, globalSecret] = await Promise.all([
     prisma.projectSecret.findFirst({
@@ -321,6 +377,7 @@ async function createProjectRecord(input: { name: string; namespace?: string }) 
     }
   });
   await syncGlobalSecretsToNamespace(namespace);
+  await syncGlobalAttractorsToProject(project.id);
   return project;
 }
 
@@ -377,12 +434,14 @@ app.post("/api/bootstrap/self", async (req, res) => {
   });
 
   await syncGlobalSecretsToNamespace(namespace);
+  await syncGlobalAttractorsToProject(project.id);
 
   const attractor = await prisma.attractorDef.upsert({
     where: {
-      projectId_name: {
+      projectId_name_scope: {
         projectId: project.id,
-        name: input.data.attractorName
+        name: input.data.attractorName,
+        scope: AttractorScope.PROJECT
       }
     },
     update: {
@@ -393,6 +452,7 @@ app.post("/api/bootstrap/self", async (req, res) => {
     },
     create: {
       projectId: project.id,
+      scope: AttractorScope.PROJECT,
       name: input.data.attractorName,
       repoPath: input.data.attractorPath,
       defaultRunType: "planning",
@@ -597,6 +657,43 @@ const createAttractorSchema = z.object({
   active: z.boolean().optional()
 });
 
+app.post("/api/attractors/global", async (req, res) => {
+  const input = createAttractorSchema.safeParse(req.body);
+  if (!input.success) {
+    return sendError(res, 400, input.error.message);
+  }
+
+  const saved = await prisma.globalAttractor.upsert({
+    where: {
+      name: input.data.name
+    },
+    update: {
+      repoPath: input.data.repoPath,
+      defaultRunType: input.data.defaultRunType,
+      description: input.data.description,
+      ...(input.data.active !== undefined ? { active: input.data.active } : {})
+    },
+    create: {
+      name: input.data.name,
+      repoPath: input.data.repoPath,
+      defaultRunType: input.data.defaultRunType,
+      description: input.data.description,
+      active: input.data.active ?? true
+    }
+  });
+
+  await propagateGlobalAttractorToAllProjects(saved);
+
+  res.status(201).json(saved);
+});
+
+app.get("/api/attractors/global", async (_req, res) => {
+  const attractors = await prisma.globalAttractor.findMany({
+    orderBy: { createdAt: "desc" }
+  });
+  res.json({ attractors });
+});
+
 app.post("/api/projects/:projectId/attractors", async (req, res) => {
   const input = createAttractorSchema.safeParse(req.body);
   if (!input.success) {
@@ -606,6 +703,7 @@ app.post("/api/projects/:projectId/attractors", async (req, res) => {
   const created = await prisma.attractorDef.create({
     data: {
       projectId: req.params.projectId,
+      scope: AttractorScope.PROJECT,
       name: input.data.name,
       repoPath: input.data.repoPath,
       defaultRunType: input.data.defaultRunType,

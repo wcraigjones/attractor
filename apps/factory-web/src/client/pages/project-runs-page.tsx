@@ -10,6 +10,7 @@ import {
   listProjectRuns,
   listProviders
 } from "../lib/api";
+import { buildEffectiveAttractors } from "../lib/attractors-view";
 import type { RunType } from "../lib/types";
 import { PageTitle } from "../components/layout/page-title";
 import { Badge } from "../components/ui/badge";
@@ -55,6 +56,10 @@ export function ProjectRunsPage() {
     queryFn: () => listModels(provider),
     enabled: provider.length > 0
   });
+  const effectiveAttractors = useMemo(
+    () => buildEffectiveAttractors(attractorsQuery.data ?? []),
+    [attractorsQuery.data]
+  );
 
   const statusFilter = searchParams.get("status") ?? "all";
   const runTypeFilter = searchParams.get("runType") ?? "all";
@@ -265,9 +270,9 @@ export function ProjectRunsPage() {
                     <SelectValue placeholder="Select attractor" />
                   </SelectTrigger>
                   <SelectContent>
-                    {(attractorsQuery.data ?? []).map((attractor) => (
+                    {effectiveAttractors.map((attractor) => (
                       <SelectItem key={attractor.id} value={attractor.id}>
-                        {attractor.name}
+                        {attractor.scope === "PROJECT" ? attractor.name : `${attractor.name} (global)`}
                       </SelectItem>
                     ))}
                   </SelectContent>
