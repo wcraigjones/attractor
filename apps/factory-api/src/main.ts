@@ -2,12 +2,14 @@ import express from "express";
 import { Readable } from "node:stream";
 import { KubeConfig, CoreV1Api } from "@kubernetes/client-node";
 import { App as GitHubApp } from "@octokit/app";
-import { AttractorScope, PrismaClient, RunStatus, RunType } from "@prisma/client";
+import { AttractorScope, EnvironmentKind, PrismaClient, RunStatus, RunType } from "@prisma/client";
 import { Redis } from "ioredis";
 import { getModels, getProviders } from "@mariozechner/pi-ai";
 import { GetObjectCommand, HeadObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { z } from "zod";
 import {
+  type EnvironmentResources,
+  type RunExecutionEnvironment,
   runCancelKey,
   runEventChannel,
   runLockKey,
@@ -41,10 +43,27 @@ app.use((req, res, next) => {
 const PORT = Number(process.env.PORT ?? 8080);
 const HOST = process.env.HOST ?? "0.0.0.0";
 const RUNNER_DEFAULT_IMAGE =
-  process.env.RUNNER_IMAGE ?? "ghcr.io/wcraigjones/attractor-runner:latest";
+  process.env.RUNNER_IMAGE ?? "ghcr.io/wcraigjones/attractor-factory-runner:latest";
+const RUNNER_DEFAULT_SERVICE_ACCOUNT = process.env.RUNNER_SERVICE_ACCOUNT ?? "factory-runner";
+const DEFAULT_ENVIRONMENT_NAME = process.env.DEFAULT_ENVIRONMENT_NAME ?? "default-k8s";
 const GLOBAL_SECRET_NAMESPACE =
   process.env.GLOBAL_SECRET_NAMESPACE ?? process.env.FACTORY_SYSTEM_NAMESPACE ?? "factory-system";
 const MINIO_BUCKET = process.env.MINIO_BUCKET ?? "factory-artifacts";
+const digestPinnedImagePattern = /@sha256:[a-f0-9]{64}$/;
+const environmentResourcesSchema = z.object({
+  requests: z
+    .object({
+      cpu: z.string().min(1).optional(),
+      memory: z.string().min(1).optional()
+    })
+    .optional(),
+  limits: z
+    .object({
+      cpu: z.string().min(1).optional(),
+      memory: z.string().min(1).optional()
+    })
+    .optional()
+});
 
 const minioClient = new S3Client({
   region: "us-east-1",
@@ -108,6 +127,124 @@ function normalizeRunModelConfig(config: RunModelConfig): RunModelConfig {
     throw new Error("maxTokens must be a positive integer");
   }
   return config;
+}
+
+function isDigestPinnedImage(value: string): boolean {
+  return digestPinnedImagePattern.test(value);
+}
+
+function validateDigestPinnedImage(value: string): string {
+  if (!isDigestPinnedImage(value)) {
+    throw new Error("runnerImage must be pinned by digest (example: ghcr.io/org/image@sha256:...)");
+  }
+  return value;
+}
+
+function normalizeEnvironmentResources(value: unknown): EnvironmentResources | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const parsed = environmentResourcesSchema.safeParse(value);
+  if (!parsed.success) {
+    return undefined;
+  }
+  return parsed.data;
+}
+
+function toRunExecutionEnvironment(environment: {
+  id: string;
+  name: string;
+  kind: EnvironmentKind;
+  runnerImage: string;
+  serviceAccountName: string | null;
+  resourcesJson: unknown;
+}): RunExecutionEnvironment {
+  const resources = normalizeEnvironmentResources(environment.resourcesJson);
+  return {
+    id: environment.id,
+    name: environment.name,
+    kind: environment.kind,
+    runnerImage: environment.runnerImage,
+    ...(environment.serviceAccountName ? { serviceAccountName: environment.serviceAccountName } : {}),
+    ...(resources ? { resources } : {})
+  };
+}
+
+async function ensureDefaultEnvironment() {
+  const existing = await prisma.environment.findUnique({
+    where: { name: DEFAULT_ENVIRONMENT_NAME }
+  });
+  if (existing) {
+    return existing;
+  }
+
+  return prisma.environment.create({
+    data: {
+      name: DEFAULT_ENVIRONMENT_NAME,
+      kind: EnvironmentKind.KUBERNETES_JOB,
+      runnerImage: RUNNER_DEFAULT_IMAGE,
+      serviceAccountName: RUNNER_DEFAULT_SERVICE_ACCOUNT,
+      active: true
+    }
+  });
+}
+
+async function resolveProjectDefaultEnvironment(projectId: string, explicitEnvironmentId?: string) {
+  if (explicitEnvironmentId) {
+    const environment = await prisma.environment.findUnique({
+      where: { id: explicitEnvironmentId }
+    });
+    if (!environment) {
+      throw new Error("environment not found");
+    }
+    if (!environment.active) {
+      throw new Error(`environment ${environment.name} is inactive`);
+    }
+    return environment;
+  }
+
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
+    select: { defaultEnvironmentId: true }
+  });
+  if (!project) {
+    throw new Error("project not found");
+  }
+
+  if (project.defaultEnvironmentId) {
+    const environment = await prisma.environment.findUnique({
+      where: { id: project.defaultEnvironmentId }
+    });
+    if (!environment) {
+      throw new Error("project default environment no longer exists");
+    }
+    if (!environment.active) {
+      throw new Error(`project default environment ${environment.name} is inactive`);
+    }
+    return environment;
+  }
+
+  const fallback = await ensureDefaultEnvironment();
+  await prisma.project.update({
+    where: { id: projectId },
+    data: { defaultEnvironmentId: fallback.id }
+  });
+  return fallback;
+}
+
+async function resolveRunEnvironment(input: {
+  projectId: string;
+  explicitEnvironmentId?: string;
+}): Promise<{ id: string; snapshot: RunExecutionEnvironment }> {
+  const environment = await resolveProjectDefaultEnvironment(
+    input.projectId,
+    input.explicitEnvironmentId
+  );
+
+  return {
+    id: environment.id,
+    snapshot: toRunExecutionEnvironment(environment)
+  };
 }
 
 function getKubeApi(): CoreV1Api | null {
@@ -362,18 +499,126 @@ app.get("/api/secrets/providers/:provider", (req, res) => {
   res.json(schema);
 });
 
-const createProjectSchema = z.object({
+const createEnvironmentSchema = z.object({
   name: z.string().min(2).max(80),
-  namespace: z.string().min(2).max(63).optional()
+  kind: z.enum(["KUBERNETES_JOB"]).default("KUBERNETES_JOB"),
+  runnerImage: z.string().min(1),
+  serviceAccountName: z.string().min(1).optional(),
+  resourcesJson: environmentResourcesSchema.optional(),
+  active: z.boolean().optional()
 });
 
-async function createProjectRecord(input: { name: string; namespace?: string }) {
+const patchEnvironmentSchema = z
+  .object({
+    name: z.string().min(2).max(80).optional(),
+    runnerImage: z.string().min(1).optional(),
+    serviceAccountName: z.string().min(1).nullable().optional(),
+    resourcesJson: environmentResourcesSchema.optional(),
+    active: z.boolean().optional()
+  })
+  .refine((value) => Object.keys(value).length > 0, {
+    message: "at least one field is required"
+  });
+
+app.get("/api/environments", async (_req, res) => {
+  await ensureDefaultEnvironment();
+  const environments = await prisma.environment.findMany({
+    orderBy: { createdAt: "desc" }
+  });
+  res.json({ environments });
+});
+
+app.post("/api/environments", async (req, res) => {
+  const input = createEnvironmentSchema.safeParse(req.body);
+  if (!input.success) {
+    return sendError(res, 400, input.error.message);
+  }
+
+  try {
+    validateDigestPinnedImage(input.data.runnerImage);
+  } catch (error) {
+    return sendError(res, 400, error instanceof Error ? error.message : String(error));
+  }
+
+  try {
+    const environment = await prisma.environment.create({
+      data: {
+        name: input.data.name,
+        kind: input.data.kind,
+        runnerImage: input.data.runnerImage,
+        serviceAccountName: input.data.serviceAccountName,
+        resourcesJson: input.data.resourcesJson,
+        active: input.data.active ?? true
+      }
+    });
+    res.status(201).json(environment);
+  } catch (error) {
+    return sendError(res, 409, error instanceof Error ? error.message : String(error));
+  }
+});
+
+app.patch("/api/environments/:environmentId", async (req, res) => {
+  const input = patchEnvironmentSchema.safeParse(req.body);
+  if (!input.success) {
+    return sendError(res, 400, input.error.message);
+  }
+
+  if (input.data.runnerImage) {
+    try {
+      validateDigestPinnedImage(input.data.runnerImage);
+    } catch (error) {
+      return sendError(res, 400, error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  try {
+    const updated = await prisma.environment.update({
+      where: { id: req.params.environmentId },
+      data: {
+        ...(input.data.name !== undefined ? { name: input.data.name } : {}),
+        ...(input.data.runnerImage !== undefined ? { runnerImage: input.data.runnerImage } : {}),
+        ...(input.data.serviceAccountName !== undefined
+          ? { serviceAccountName: input.data.serviceAccountName }
+          : {}),
+        ...(input.data.resourcesJson !== undefined ? { resourcesJson: input.data.resourcesJson } : {}),
+        ...(input.data.active !== undefined ? { active: input.data.active } : {})
+      }
+    });
+    res.json(updated);
+  } catch (error) {
+    return sendError(res, 404, error instanceof Error ? error.message : String(error));
+  }
+});
+
+const createProjectSchema = z.object({
+  name: z.string().min(2).max(80),
+  namespace: z.string().min(2).max(63).optional(),
+  defaultEnvironmentId: z.string().min(1).optional()
+});
+
+async function createProjectRecord(input: {
+  name: string;
+  namespace?: string;
+  defaultEnvironmentId?: string;
+}) {
   const namespace = input.namespace ?? toProjectNamespace(input.name);
+  const defaultEnvironment = input.defaultEnvironmentId
+    ? await prisma.environment.findUnique({
+        where: { id: input.defaultEnvironmentId }
+      })
+    : await ensureDefaultEnvironment();
+  if (!defaultEnvironment) {
+    throw new Error("default environment not found");
+  }
+  if (!defaultEnvironment.active) {
+    throw new Error(`environment ${defaultEnvironment.name} is inactive`);
+  }
   await ensureNamespace(namespace);
   const project = await prisma.project.create({
     data: {
       name: input.name,
-      namespace
+      namespace,
+      defaultEnvironmentId: defaultEnvironment.id
     }
   });
   await syncGlobalSecretsToNamespace(namespace);
@@ -387,7 +632,12 @@ app.post("/api/projects", async (req, res) => {
     return sendError(res, 400, input.error.message);
   }
 
-  const project = await createProjectRecord(input.data);
+  let project;
+  try {
+    project = await createProjectRecord(input.data);
+  } catch (error) {
+    return sendError(res, 400, error instanceof Error ? error.message : String(error));
+  }
 
   res.status(201).json(project);
 });
@@ -397,9 +647,43 @@ app.get("/api/projects", async (_req, res) => {
   res.json({ projects });
 });
 
+const projectDefaultEnvironmentSchema = z.object({
+  environmentId: z.string().min(1)
+});
+
+app.post("/api/projects/:projectId/environment", async (req, res) => {
+  const input = projectDefaultEnvironmentSchema.safeParse(req.body);
+  if (!input.success) {
+    return sendError(res, 400, input.error.message);
+  }
+
+  const project = await prisma.project.findUnique({ where: { id: req.params.projectId } });
+  if (!project) {
+    return sendError(res, 404, "project not found");
+  }
+
+  const environment = await prisma.environment.findUnique({
+    where: { id: input.data.environmentId }
+  });
+  if (!environment) {
+    return sendError(res, 404, "environment not found");
+  }
+  if (!environment.active) {
+    return sendError(res, 409, `environment ${environment.name} is inactive`);
+  }
+
+  const updatedProject = await prisma.project.update({
+    where: { id: project.id },
+    data: { defaultEnvironmentId: environment.id }
+  });
+
+  res.json(updatedProject);
+});
+
 const bootstrapSelfSchema = z.object({
   name: z.string().min(2).max(80).default("attractor-self"),
   namespace: z.string().min(2).max(63).optional(),
+  defaultEnvironmentId: z.string().min(1).optional(),
   repoFullName: z.string().min(3),
   defaultBranch: z.string().min(1).default("main"),
   installationId: z.string().min(1).optional(),
@@ -416,12 +700,29 @@ app.post("/api/bootstrap/self", async (req, res) => {
   const namespace = input.data.namespace ?? toProjectNamespace(input.data.name);
   await ensureNamespace(namespace);
 
+  let explicitEnvironmentId: string | undefined;
+  if (input.data.defaultEnvironmentId) {
+    const explicitEnvironment = await prisma.environment.findUnique({
+      where: { id: input.data.defaultEnvironmentId }
+    });
+    if (!explicitEnvironment) {
+      return sendError(res, 404, "default environment not found");
+    }
+    if (!explicitEnvironment.active) {
+      return sendError(res, 409, `environment ${explicitEnvironment.name} is inactive`);
+    }
+    explicitEnvironmentId = explicitEnvironment.id;
+  } else {
+    explicitEnvironmentId = (await ensureDefaultEnvironment()).id;
+  }
+
   const project = await prisma.project.upsert({
     where: { namespace },
     update: {
       name: input.data.name,
       repoFullName: input.data.repoFullName,
       defaultBranch: input.data.defaultBranch,
+      ...(input.data.defaultEnvironmentId ? { defaultEnvironmentId: explicitEnvironmentId } : {}),
       ...(input.data.installationId ? { githubInstallationId: input.data.installationId } : {})
     },
     create: {
@@ -429,17 +730,26 @@ app.post("/api/bootstrap/self", async (req, res) => {
       namespace,
       repoFullName: input.data.repoFullName,
       defaultBranch: input.data.defaultBranch,
+      defaultEnvironmentId: explicitEnvironmentId,
       ...(input.data.installationId ? { githubInstallationId: input.data.installationId } : {})
     }
   });
 
+  let effectiveProject = project;
+  if (!project.defaultEnvironmentId) {
+    effectiveProject = await prisma.project.update({
+      where: { id: project.id },
+      data: { defaultEnvironmentId: explicitEnvironmentId }
+    });
+  }
+
   await syncGlobalSecretsToNamespace(namespace);
-  await syncGlobalAttractorsToProject(project.id);
+  await syncGlobalAttractorsToProject(effectiveProject.id);
 
   const attractor = await prisma.attractorDef.upsert({
     where: {
       projectId_name_scope: {
-        projectId: project.id,
+        projectId: effectiveProject.id,
         name: input.data.attractorName,
         scope: AttractorScope.PROJECT
       }
@@ -451,7 +761,7 @@ app.post("/api/bootstrap/self", async (req, res) => {
       description: "Self-bootstrap attractor pipeline for this repository"
     },
     create: {
-      projectId: project.id,
+      projectId: effectiveProject.id,
       scope: AttractorScope.PROJECT,
       name: input.data.attractorName,
       repoPath: input.data.attractorPath,
@@ -461,7 +771,7 @@ app.post("/api/bootstrap/self", async (req, res) => {
     }
   });
 
-  res.status(201).json({ project, attractor });
+  res.status(201).json({ project: effectiveProject, attractor });
 });
 
 const githubConnectSchema = z.object({
@@ -735,6 +1045,7 @@ app.get("/api/projects/:projectId/runs", async (req, res) => {
 const createRunSchema = z.object({
   projectId: z.string().min(1),
   attractorDefId: z.string().min(1),
+  environmentId: z.string().min(1).optional(),
   runType: z.enum(["planning", "implementation"]),
   sourceBranch: z.string().min(1),
   targetBranch: z.string().min(1),
@@ -822,10 +1133,22 @@ app.post("/api/runs", async (req, res) => {
     }
   }
 
+  let resolvedEnvironment;
+  try {
+    resolvedEnvironment = await resolveRunEnvironment({
+      projectId: project.id,
+      explicitEnvironmentId: input.data.environmentId
+    });
+  } catch (error) {
+    return sendError(res, 409, error instanceof Error ? error.message : String(error));
+  }
+
   const run = await prisma.run.create({
     data: {
       projectId: project.id,
       attractorDefId: attractorDef.id,
+      environmentId: resolvedEnvironment.id,
+      environmentSnapshot: resolvedEnvironment.snapshot as never,
       runType: input.data.runType,
       sourceBranch: input.data.sourceBranch,
       targetBranch: input.data.targetBranch,
@@ -840,7 +1163,8 @@ app.post("/api/runs", async (req, res) => {
     projectId: run.projectId,
     targetBranch: run.targetBranch,
     modelConfig: input.data.modelConfig,
-    runnerImage: RUNNER_DEFAULT_IMAGE
+    environment: resolvedEnvironment.snapshot,
+    runnerImage: resolvedEnvironment.snapshot.runnerImage
   });
 
   await redis.lpush(runQueueKey(), run.id);
@@ -850,6 +1174,7 @@ app.post("/api/runs", async (req, res) => {
 
 const selfIterateSchema = z.object({
   attractorDefId: z.string().min(1),
+  environmentId: z.string().min(1).optional(),
   sourceBranch: z.string().min(1),
   targetBranch: z.string().min(1),
   modelConfig: z.object({
@@ -928,10 +1253,22 @@ app.post("/api/projects/:projectId/self-iterate", async (req, res) => {
     }
   }
 
+  let resolvedEnvironment;
+  try {
+    resolvedEnvironment = await resolveRunEnvironment({
+      projectId: project.id,
+      explicitEnvironmentId: input.data.environmentId
+    });
+  } catch (error) {
+    return sendError(res, 409, error instanceof Error ? error.message : String(error));
+  }
+
   const run = await prisma.run.create({
     data: {
       projectId: project.id,
       attractorDefId: attractorDef.id,
+      environmentId: resolvedEnvironment.id,
+      environmentSnapshot: resolvedEnvironment.snapshot as never,
       runType: RunType.implementation,
       sourceBranch: input.data.sourceBranch,
       targetBranch: input.data.targetBranch,
@@ -946,7 +1283,8 @@ app.post("/api/projects/:projectId/self-iterate", async (req, res) => {
     projectId: run.projectId,
     targetBranch: run.targetBranch,
     modelConfig: input.data.modelConfig,
-    runnerImage: RUNNER_DEFAULT_IMAGE,
+    environment: resolvedEnvironment.snapshot,
+    runnerImage: resolvedEnvironment.snapshot.runnerImage,
     sourcePlanningRunId: latestPlanningRun.id,
     sourceSpecBundleId: latestPlanningRun.specBundleId
   });
@@ -965,6 +1303,7 @@ app.get("/api/runs/:runId", async (req, res) => {
   const run = await prisma.run.findUnique({
     where: { id: req.params.runId },
     include: {
+      environment: true,
       events: {
         orderBy: { ts: "asc" },
         take: 200

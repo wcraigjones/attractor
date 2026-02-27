@@ -6,6 +6,7 @@ import {
   runEventChannel,
   runLockKey,
   runQueueKey,
+  type RunExecutionEnvironment,
   type RunExecutionSpec,
   type RunModelConfig
 } from "@attractor/shared-types";
@@ -21,7 +22,8 @@ const redis = new Redis(process.env.REDIS_URL ?? "redis://127.0.0.1:6379");
 
 const POLL_TIMEOUT_SECONDS = Number(process.env.RUN_QUEUE_POLL_TIMEOUT_SECONDS ?? 5);
 const PROJECT_CONCURRENCY_LIMIT = Number(process.env.PROJECT_CONCURRENCY_LIMIT ?? 5);
-const RUNNER_IMAGE = process.env.RUNNER_IMAGE ?? "ghcr.io/wcraigjones/attractor-runner:latest";
+const RUNNER_FALLBACK_IMAGE =
+  process.env.RUNNER_IMAGE ?? "ghcr.io/wcraigjones/attractor-factory-runner:latest";
 const FACTORY_API_BASE_URL = process.env.FACTORY_API_BASE_URL ?? "http://factory-api.factory-system.svc.cluster.local:8080";
 const POSTGRES_URL = process.env.DATABASE_URL ?? "postgresql://postgres:postgres@postgres.factory-system.svc.cluster.local:5432/factory";
 const MINIO_ENDPOINT = process.env.MINIO_ENDPOINT ?? "http://minio.factory-system.svc.cluster.local:9000";
@@ -98,6 +100,42 @@ async function modelConfigForRun(runId: string): Promise<RunModelConfig> {
   return payload.modelConfig;
 }
 
+function normalizeSnapshot(value: unknown): RunExecutionEnvironment | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const snapshot = value as {
+    id?: unknown;
+    name?: unknown;
+    kind?: unknown;
+    runnerImage?: unknown;
+    serviceAccountName?: unknown;
+    resources?: unknown;
+  };
+
+  if (
+    typeof snapshot.id !== "string" ||
+    typeof snapshot.name !== "string" ||
+    snapshot.kind !== "KUBERNETES_JOB" ||
+    typeof snapshot.runnerImage !== "string"
+  ) {
+    return null;
+  }
+
+  return {
+    id: snapshot.id,
+    name: snapshot.name,
+    kind: "KUBERNETES_JOB",
+    runnerImage: snapshot.runnerImage,
+    ...(typeof snapshot.serviceAccountName === "string"
+      ? { serviceAccountName: snapshot.serviceAccountName }
+      : {}),
+    ...(snapshot.resources && typeof snapshot.resources === "object"
+      ? { resources: snapshot.resources as RunExecutionEnvironment["resources"] }
+      : {})
+  };
+}
+
 async function enqueueRun(runId: string): Promise<void> {
   await redis.rpush(runQueueKey(), runId);
 }
@@ -108,7 +146,8 @@ async function processRun(runId: string): Promise<void> {
     include: {
       project: true,
       attractorDef: true,
-      referencedSpecBundle: true
+      referencedSpecBundle: true,
+      environment: true
     }
   });
 
@@ -166,7 +205,22 @@ async function processRun(runId: string): Promise<void> {
   }
 
   try {
-    await ensureServiceAccount(run.project.namespace, SERVICE_ACCOUNT);
+    const snapshot = normalizeSnapshot(run.environmentSnapshot);
+    const resolvedEnvironment: RunExecutionEnvironment = snapshot ?? {
+      id: run.environment?.id ?? "legacy-default",
+      name: run.environment?.name ?? "legacy-default",
+      kind: "KUBERNETES_JOB",
+      runnerImage: run.environment?.runnerImage ?? RUNNER_FALLBACK_IMAGE,
+      ...(run.environment?.serviceAccountName
+        ? { serviceAccountName: run.environment.serviceAccountName }
+        : {}),
+      ...(run.environment?.resourcesJson && typeof run.environment.resourcesJson === "object"
+        ? { resources: run.environment.resourcesJson as RunExecutionEnvironment["resources"] }
+        : {})
+    };
+
+    const effectiveServiceAccount = resolvedEnvironment.serviceAccountName ?? SERVICE_ACCOUNT;
+    await ensureServiceAccount(run.project.namespace, effectiveServiceAccount);
 
     const [projectSecrets, globalSecrets] = await Promise.all([
       prisma.projectSecret.findMany({ where: { projectId: run.projectId } }),
@@ -223,6 +277,7 @@ async function processRun(runId: string): Promise<void> {
       projectId: run.projectId,
       runType: run.runType,
       attractorDefId: run.attractorDefId,
+      environment: resolvedEnvironment,
       sourceBranch: run.sourceBranch,
       targetBranch: run.targetBranch,
       ...(run.specBundleId ? { specBundleId: run.specBundleId } : {}),
@@ -237,7 +292,7 @@ async function processRun(runId: string): Promise<void> {
     const job = buildRunnerJobManifest({
       runId: run.id,
       namespace: run.project.namespace,
-      image: RUNNER_IMAGE,
+      image: resolvedEnvironment.runnerImage,
       executionSpec,
       secretEnv,
       apiBaseUrl: FACTORY_API_BASE_URL,
@@ -247,7 +302,7 @@ async function processRun(runId: string): Promise<void> {
       minioBucket: MINIO_BUCKET,
       minioAccessKey: MINIO_ACCESS_KEY,
       minioSecretKey: MINIO_SECRET_KEY,
-      serviceAccountName: SERVICE_ACCOUNT
+      defaultServiceAccountName: SERVICE_ACCOUNT
     });
 
     await batchApi.createNamespacedJob({ namespace: run.project.namespace, body: job });
@@ -265,7 +320,8 @@ async function processRun(runId: string): Promise<void> {
       status: updated.status,
       namespace: run.project.namespace,
       jobName: job.metadata?.name,
-      runType: run.runType
+      runType: run.runType,
+      environment: resolvedEnvironment
     });
   } catch (error) {
     await prisma.run.update({

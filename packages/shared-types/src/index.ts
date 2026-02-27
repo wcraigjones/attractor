@@ -16,6 +16,31 @@ export interface RunModelConfig {
   maxTokens?: number;
 }
 
+export type EnvironmentKind = "KUBERNETES_JOB";
+
+export interface EnvironmentResources {
+  requests?: {
+    cpu?: string;
+    memory?: string;
+  };
+  limits?: {
+    cpu?: string;
+    memory?: string;
+  };
+}
+
+export interface Environment {
+  id: string;
+  name: string;
+  kind: EnvironmentKind;
+  runnerImage: string;
+  serviceAccountName: string | null;
+  resourcesJson: EnvironmentResources | null;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -23,6 +48,7 @@ export interface Project {
   githubInstallationId: string | null;
   repoFullName: string | null;
   defaultBranch: string | null;
+  defaultEnvironmentId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -54,11 +80,13 @@ export interface Run {
   id: string;
   projectId: string;
   attractorDefId: string;
+  environmentId: string | null;
   runType: RunType;
   sourceBranch: string;
   targetBranch: string;
   status: RunStatus;
   specBundleId: string | null;
+  environmentSnapshot: RunExecutionEnvironment | null;
   prUrl: string | null;
   error: string | null;
   createdAt: string;
@@ -90,11 +118,21 @@ export interface RunEvent {
   payload: unknown;
 }
 
+export interface RunExecutionEnvironment {
+  id: string;
+  name: string;
+  kind: EnvironmentKind;
+  runnerImage: string;
+  serviceAccountName?: string;
+  resources?: EnvironmentResources;
+}
+
 export interface RunExecutionSpec {
   runId: string;
   projectId: string;
   runType: RunType;
   attractorDefId: string;
+  environment: RunExecutionEnvironment;
   sourceBranch: string;
   targetBranch: string;
   specBundleId?: string;

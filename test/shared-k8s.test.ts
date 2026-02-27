@@ -54,6 +54,17 @@ describe("shared k8s helpers", () => {
         projectId: "project-1",
         runType: "planning",
         attractorDefId: "attractor-1",
+        environment: {
+          id: "env-1",
+          name: "default-k8s",
+          kind: "KUBERNETES_JOB",
+          runnerImage: "attractor/factory-runner@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          serviceAccountName: "custom-runner",
+          resources: {
+            requests: { cpu: "750m" },
+            limits: { memory: "6Gi" }
+          }
+        },
         sourceBranch: "main",
         targetBranch: "attractor/run-123",
         modelConfig: { provider: "openai", modelId: "gpt-4.1-mini" },
@@ -67,14 +78,21 @@ describe("shared k8s helpers", () => {
       minioEndpoint: "http://minio.factory-system.svc.cluster.local:9000",
       minioBucket: "factory-artifacts",
       minioAccessKey: "minioadmin",
-      minioSecretKey: "minioadmin"
+      minioSecretKey: "minioadmin",
+      defaultServiceAccountName: "factory-runner"
     });
 
-    const env = job.spec?.template.spec?.containers?.[0]?.env ?? [];
+    const container = job.spec?.template.spec?.containers?.[0];
+    const env = container?.env ?? [];
     const envNames = env.map((item) => item.name);
 
     expect(envNames).toContain("RUN_EXECUTION_SPEC");
+    expect(envNames).toContain("RUN_ENVIRONMENT_SPEC");
     expect(envNames).toContain("MINIO_ACCESS_KEY");
     expect(envNames).toContain("MINIO_SECRET_KEY");
+    expect(job.spec?.template.spec?.serviceAccountName).toBe("custom-runner");
+    expect(container?.resources?.requests?.cpu).toBe("750m");
+    expect(container?.resources?.limits?.memory).toBe("6Gi");
+    expect(container?.resources?.requests?.memory).toBe("1Gi");
   });
 });

@@ -5,10 +5,12 @@ import { toast } from "sonner";
 
 import {
   connectProjectRepo,
+  listEnvironments,
   listAttractors,
   listProjectRuns,
   listProjects,
-  listProjectSecrets
+  listProjectSecrets,
+  setProjectDefaultEnvironment
 } from "../lib/api";
 import { buildEffectiveAttractors } from "../lib/attractors-view";
 import { PageTitle } from "../components/layout/page-title";
@@ -16,6 +18,7 @@ import { Button } from "../components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 
 export function ProjectOverviewPage() {
   const params = useParams<{ projectId: string }>();
@@ -25,6 +28,7 @@ export function ProjectOverviewPage() {
   const [installationId, setInstallationId] = useState("");
   const [repoFullName, setRepoFullName] = useState("");
   const [defaultBranch, setDefaultBranch] = useState("main");
+  const [selectedDefaultEnvironmentId, setSelectedDefaultEnvironmentId] = useState("");
 
   const projectsQuery = useQuery({ queryKey: ["projects"], queryFn: listProjects });
   const runsQuery = useQuery({
@@ -41,6 +45,10 @@ export function ProjectOverviewPage() {
     queryKey: ["project-secrets", projectId],
     queryFn: () => listProjectSecrets(projectId),
     enabled: projectId.length > 0
+  });
+  const environmentsQuery = useQuery({
+    queryKey: ["environments"],
+    queryFn: listEnvironments
   });
 
   const project = useMemo(
@@ -63,6 +71,23 @@ export function ProjectOverviewPage() {
       toast.error(error instanceof Error ? error.message : String(error));
     }
   });
+  const setDefaultEnvironmentMutation = useMutation({
+    mutationFn: (environmentId: string) => setProjectDefaultEnvironment(projectId, environmentId),
+    onSuccess: () => {
+      toast.success("Default environment updated");
+      void queryClient.invalidateQueries({ queryKey: ["projects"] });
+      void queryClient.invalidateQueries({ queryKey: ["project-runs", projectId] });
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : String(error));
+    }
+  });
+
+  const effectiveDefaultEnvironmentId =
+    selectedDefaultEnvironmentId || project?.defaultEnvironmentId || "";
+  const defaultEnvironment = (environmentsQuery.data ?? []).find(
+    (environment) => environment.id === project?.defaultEnvironmentId
+  );
 
   if (!project) {
     return <p className="text-sm text-muted-foreground">Project not found.</p>;
@@ -97,6 +122,12 @@ export function ProjectOverviewPage() {
           <CardHeader>
             <CardDescription>Project Secrets</CardDescription>
             <CardTitle>{secretsQuery.data?.length ?? 0}</CardTitle>
+          </CardHeader>
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardDescription>Default Environment</CardDescription>
+            <CardTitle>{defaultEnvironment?.name ?? "Not configured"}</CardTitle>
           </CardHeader>
         </Card>
       </div>
@@ -174,6 +205,49 @@ export function ProjectOverviewPage() {
             <p>
               <span className="text-muted-foreground">GitHub installation:</span> {project.githubInstallationId ?? "-"}
             </p>
+            <p>
+              <span className="text-muted-foreground">Environment:</span> {defaultEnvironment?.name ?? "-"}
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Execution Environment</CardTitle>
+            <CardDescription>Select the default runtime environment for new runs.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="space-y-1">
+              <Label>Default Environment</Label>
+              <Select
+                value={effectiveDefaultEnvironmentId || undefined}
+                onValueChange={setSelectedDefaultEnvironmentId}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Select environment" />
+                </SelectTrigger>
+                <SelectContent>
+                  {(environmentsQuery.data ?? []).map((environment) => (
+                    <SelectItem key={environment.id} value={environment.id}>
+                      {environment.name}
+                      {environment.active ? "" : " (inactive)"}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <Button
+              onClick={() => {
+                if (!effectiveDefaultEnvironmentId) {
+                  toast.error("Select an environment first");
+                  return;
+                }
+                setDefaultEnvironmentMutation.mutate(effectiveDefaultEnvironmentId);
+              }}
+              disabled={setDefaultEnvironmentMutation.isPending || !effectiveDefaultEnvironmentId}
+            >
+              {setDefaultEnvironmentMutation.isPending ? "Saving..." : "Save Default Environment"}
+            </Button>
           </CardContent>
         </Card>
       </div>

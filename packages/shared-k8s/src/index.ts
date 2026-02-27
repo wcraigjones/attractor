@@ -1,4 +1,4 @@
-import type { V1EnvVar, V1Job } from "@kubernetes/client-node";
+import type { V1EnvVar, V1Job, V1ResourceRequirements } from "@kubernetes/client-node";
 
 import type { RunExecutionSpec } from "@attractor/shared-types";
 
@@ -161,9 +161,30 @@ export function buildRunnerJobManifest(input: {
   minioBucket: string;
   minioAccessKey: string;
   minioSecretKey: string;
-  serviceAccountName?: string;
+  defaultServiceAccountName?: string;
 }): V1Job {
   const name = `factory-run-${input.runId}`.slice(0, 63);
+  const environment = input.executionSpec.environment;
+  const defaultResources: V1ResourceRequirements = {
+    requests: {
+      cpu: "500m",
+      memory: "1Gi"
+    },
+    limits: {
+      cpu: "2",
+      memory: "4Gi"
+    }
+  };
+  const resources: V1ResourceRequirements = {
+    requests: {
+      ...defaultResources.requests,
+      ...(environment.resources?.requests ?? {})
+    },
+    limits: {
+      ...defaultResources.limits,
+      ...(environment.resources?.limits ?? {})
+    }
+  };
 
   return {
     apiVersion: "batch/v1",
@@ -189,7 +210,10 @@ export function buildRunnerJobManifest(input: {
         },
         spec: {
           restartPolicy: "Never",
-          serviceAccountName: input.serviceAccountName ?? "factory-runner",
+          serviceAccountName:
+            environment.serviceAccountName ??
+            input.defaultServiceAccountName ??
+            "factory-runner",
           containers: [
             {
               name: "runner",
@@ -198,6 +222,7 @@ export function buildRunnerJobManifest(input: {
               command: ["node", "apps/factory-runner/dist/apps/factory-runner/src/main.js"],
               env: [
                 { name: "RUN_EXECUTION_SPEC", value: JSON.stringify(input.executionSpec) },
+                { name: "RUN_ENVIRONMENT_SPEC", value: JSON.stringify(environment) },
                 { name: "FACTORY_API_BASE_URL", value: input.apiBaseUrl },
                 { name: "REDIS_URL", value: input.redisUrl },
                 { name: "DATABASE_URL", value: input.postgresUrl },
@@ -207,16 +232,7 @@ export function buildRunnerJobManifest(input: {
                 { name: "MINIO_SECRET_KEY", value: input.minioSecretKey },
                 ...input.secretEnv
               ],
-              resources: {
-                requests: {
-                  cpu: "500m",
-                  memory: "1Gi"
-                },
-                limits: {
-                  cpu: "2",
-                  memory: "4Gi"
-                }
-              }
+              resources
             }
           ]
         }

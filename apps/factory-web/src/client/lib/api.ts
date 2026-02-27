@@ -2,6 +2,8 @@ import type {
   Artifact,
   ArtifactContentResponse,
   AttractorDef,
+  Environment,
+  EnvironmentResources,
   GlobalAttractor,
   GlobalSecret,
   Project,
@@ -67,10 +69,59 @@ export async function connectProjectRepo(
   });
 }
 
-export async function createProject(input: { name: string; namespace?: string }): Promise<Project> {
+export async function createProject(input: {
+  name: string;
+  namespace?: string;
+  defaultEnvironmentId?: string;
+}): Promise<Project> {
   return apiRequest<Project>("/api/projects", {
     method: "POST",
     body: JSON.stringify(input)
+  });
+}
+
+export async function listEnvironments(): Promise<Environment[]> {
+  const payload = await apiRequest<{ environments: Environment[] }>("/api/environments");
+  return payload.environments;
+}
+
+export async function createEnvironment(input: {
+  name: string;
+  kind?: "KUBERNETES_JOB";
+  runnerImage: string;
+  serviceAccountName?: string;
+  resourcesJson?: EnvironmentResources;
+  active?: boolean;
+}): Promise<Environment> {
+  return apiRequest<Environment>("/api/environments", {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+}
+
+export async function updateEnvironment(
+  environmentId: string,
+  input: {
+    name?: string;
+    runnerImage?: string;
+    serviceAccountName?: string | null;
+    resourcesJson?: EnvironmentResources | null;
+    active?: boolean;
+  }
+): Promise<Environment> {
+  return apiRequest<Environment>(`/api/environments/${environmentId}`, {
+    method: "PATCH",
+    body: JSON.stringify(input)
+  });
+}
+
+export async function setProjectDefaultEnvironment(
+  projectId: string,
+  environmentId: string
+): Promise<Project> {
+  return apiRequest<Project>(`/api/projects/${projectId}/environment`, {
+    method: "POST",
+    body: JSON.stringify({ environmentId })
   });
 }
 
@@ -187,6 +238,7 @@ export async function listProjectRuns(projectId: string): Promise<Run[]> {
 export async function createRun(input: {
   projectId: string;
   attractorDefId: string;
+  environmentId?: string;
   runType: "planning" | "implementation";
   sourceBranch: string;
   targetBranch: string;

@@ -103,6 +103,9 @@ export function RunDetailPage() {
   }
 
   const run = runQuery.data;
+  const environmentName =
+    run.environmentSnapshot?.name ?? run.environmentId ?? "not set";
+  const environmentImage = run.environmentSnapshot?.runnerImage ?? "-";
 
   return (
     <div>
@@ -163,6 +166,13 @@ export function RunDetailPage() {
               </p>
               <p>
                 <span className="text-muted-foreground">Spec bundle:</span> {run.specBundleId ?? "-"}
+              </p>
+              <p>
+                <span className="text-muted-foreground">Environment:</span> {environmentName}
+              </p>
+              <p>
+                <span className="text-muted-foreground">Runner image:</span>{" "}
+                <span className="mono text-xs">{environmentImage}</span>
               </p>
               <p>
                 <span className="text-muted-foreground">PR URL:</span>{" "}

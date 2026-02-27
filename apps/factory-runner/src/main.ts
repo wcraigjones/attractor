@@ -24,7 +24,13 @@ import {
   type Context,
   type ToolCall
 } from "@mariozechner/pi-ai";
-import { runCancelKey, runEventChannel, runLockKey, type RunExecutionSpec } from "@attractor/shared-types";
+import {
+  runCancelKey,
+  runEventChannel,
+  runLockKey,
+  type RunExecutionEnvironment,
+  type RunExecutionSpec
+} from "@attractor/shared-types";
 import { extractUnifiedDiff } from "./patch.js";
 
 const execFileAsync = promisify(execFile);
@@ -71,6 +77,25 @@ function parseSpec(): RunExecutionSpec {
   }
 
   return JSON.parse(raw) as RunExecutionSpec;
+}
+
+function parseEnvironmentSpec(spec: RunExecutionSpec): RunExecutionEnvironment {
+  if (spec.environment) {
+    return spec.environment;
+  }
+
+  const raw = process.env.RUN_ENVIRONMENT_SPEC;
+  if (raw) {
+    return JSON.parse(raw) as RunExecutionEnvironment;
+  }
+
+  return {
+    id: "legacy-default",
+    name: "legacy-default",
+    kind: "KUBERNETES_JOB",
+    runnerImage: process.env.RUNNER_IMAGE ?? "ghcr.io/wcraigjones/attractor-factory-runner:latest",
+    serviceAccountName: process.env.RUNNER_SERVICE_ACCOUNT ?? "factory-runner"
+  };
 }
 
 function ensureModel(spec: RunExecutionSpec) {
@@ -392,6 +417,7 @@ async function createPullRequest(args: {
 }
 
 async function processRun(spec: RunExecutionSpec): Promise<void> {
+  const environment = parseEnvironmentSpec(spec);
   const run = await prisma.run.findUnique({
     where: { id: spec.runId },
     include: {
@@ -418,6 +444,11 @@ async function processRun(spec: RunExecutionSpec): Promise<void> {
     runType: run.runType,
     sourceBranch: run.sourceBranch,
     targetBranch: run.targetBranch
+  });
+
+  await appendRunEvent(run.id, "EnvironmentResolved", {
+    runId: run.id,
+    environment
   });
 
   if (!run.project.repoFullName) {

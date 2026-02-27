@@ -6,7 +6,9 @@ import { toast } from "sonner";
 import {
   createRun,
   listAttractors,
+  listEnvironments,
   listModels,
+  listProjects,
   listProjectRuns,
   listProviders
 } from "../lib/api";
@@ -22,6 +24,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 
 const RUN_STATUSES = ["all", "QUEUED", "RUNNING", "SUCCEEDED", "FAILED", "CANCELED", "TIMEOUT"] as const;
+const PROJECT_DEFAULT_ENVIRONMENT = "__project_default__";
 
 export function ProjectRunsPage() {
   const params = useParams<{ projectId: string }>();
@@ -39,6 +42,7 @@ export function ProjectRunsPage() {
   const [specBundleId, setSpecBundleId] = useState("");
   const [temperature, setTemperature] = useState("0.2");
   const [maxTokens, setMaxTokens] = useState("");
+  const [environmentSelection, setEnvironmentSelection] = useState(PROJECT_DEFAULT_ENVIRONMENT);
 
   const runsQuery = useQuery({
     queryKey: ["project-runs", projectId],
@@ -51,6 +55,11 @@ export function ProjectRunsPage() {
     enabled: projectId.length > 0
   });
   const providersQuery = useQuery({ queryKey: ["providers"], queryFn: listProviders });
+  const projectsQuery = useQuery({ queryKey: ["projects"], queryFn: listProjects });
+  const environmentsQuery = useQuery({
+    queryKey: ["environments"],
+    queryFn: listEnvironments
+  });
   const modelsQuery = useQuery({
     queryKey: ["models", provider],
     queryFn: () => listModels(provider),
@@ -59,6 +68,17 @@ export function ProjectRunsPage() {
   const effectiveAttractors = useMemo(
     () => buildEffectiveAttractors(attractorsQuery.data ?? []),
     [attractorsQuery.data]
+  );
+  const project = useMemo(
+    () => (projectsQuery.data ?? []).find((candidate) => candidate.id === projectId),
+    [projectId, projectsQuery.data]
+  );
+  const defaultEnvironment = useMemo(
+    () =>
+      (environmentsQuery.data ?? []).find(
+        (environment) => environment.id === project?.defaultEnvironmentId
+      ),
+    [environmentsQuery.data, project?.defaultEnvironmentId]
   );
 
   const statusFilter = searchParams.get("status") ?? "all";
@@ -95,6 +115,9 @@ export function ProjectRunsPage() {
       return createRun({
         projectId,
         attractorDefId,
+        ...(environmentSelection !== PROJECT_DEFAULT_ENVIRONMENT
+          ? { environmentId: environmentSelection }
+          : {}),
         runType,
         sourceBranch,
         targetBranch,
@@ -287,6 +310,27 @@ export function ProjectRunsPage() {
                   <SelectContent>
                     <SelectItem value="planning">planning</SelectItem>
                     <SelectItem value="implementation">implementation</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1">
+                <Label>Environment</Label>
+                <Select value={environmentSelection} onValueChange={setEnvironmentSelection}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={PROJECT_DEFAULT_ENVIRONMENT}>
+                      {defaultEnvironment
+                        ? `Project default (${defaultEnvironment.name})`
+                        : "Project default"}
+                    </SelectItem>
+                    {(environmentsQuery.data ?? []).map((environment) => (
+                      <SelectItem key={environment.id} value={environment.id}>
+                        {environment.name}
+                        {environment.active ? "" : " (inactive)"}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>

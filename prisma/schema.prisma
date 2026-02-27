@@ -12,6 +12,10 @@ enum RunType {
   implementation
 }
 
+enum EnvironmentKind {
+  KUBERNETES_JOB
+}
+
 enum RunStatus {
   QUEUED
   RUNNING
@@ -33,11 +37,15 @@ model Project {
   githubInstallationId String?
   repoFullName         String?
   defaultBranch        String?
+  defaultEnvironmentId String?
   createdAt            DateTime       @default(now())
   updatedAt            DateTime       @updatedAt
   secrets              ProjectSecret[]
   attractors           AttractorDef[]
   runs                 Run[]
+  defaultEnvironment   Environment?   @relation("ProjectDefaultEnvironment", fields: [defaultEnvironmentId], references: [id], onDelete: SetNull)
+
+  @@index([defaultEnvironmentId])
 }
 
 model GlobalSecret {
@@ -96,11 +104,13 @@ model Run {
   id            String      @id @default(cuid())
   projectId     String
   attractorDefId String
+  environmentId String?
   runType       RunType
   sourceBranch  String
   targetBranch  String
   status        RunStatus   @default(QUEUED)
   specBundleId  String?
+  environmentSnapshot Json?
   prUrl         String?
   error         String?
   createdAt     DateTime    @default(now())
@@ -108,6 +118,7 @@ model Run {
   finishedAt    DateTime?
   project       Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
   attractorDef  AttractorDef @relation(fields: [attractorDefId], references: [id], onDelete: Cascade)
+  environment   Environment? @relation(fields: [environmentId], references: [id], onDelete: SetNull)
   events        RunEvent[]
   artifacts     Artifact[]
   producedSpecBundle SpecBundle? @relation("ProducedSpecBundle")
@@ -115,6 +126,21 @@ model Run {
 
   @@index([projectId, status])
   @@index([projectId, targetBranch, runType, status])
+  @@index([environmentId])
+}
+
+model Environment {
+  id                 String          @id @default(cuid())
+  name               String          @unique
+  kind               EnvironmentKind @default(KUBERNETES_JOB)
+  runnerImage        String
+  serviceAccountName String?
+  resourcesJson      Json?
+  active             Boolean         @default(true)
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+  defaultForProjects Project[]       @relation("ProjectDefaultEnvironment")
+  runs               Run[]
 }
 
 model SpecBundle {

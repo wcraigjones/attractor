@@ -148,6 +148,9 @@ Implemented endpoints:
 
 - `GET /api/models/providers`
 - `GET /api/models?provider=<provider>`
+- `GET /api/environments`
+- `POST /api/environments`
+- `PATCH /api/environments/{environmentId}`
 - `GET /api/secrets/providers`
 - `GET /api/secrets/providers/{provider}`
 - `POST /api/secrets/global`
@@ -156,6 +159,7 @@ Implemented endpoints:
 - `GET /api/attractors/global`
 - `POST /api/projects`
 - `GET /api/projects`
+- `POST /api/projects/{projectId}/environment`
 - `POST /api/bootstrap/self`
 - `POST /api/projects/{projectId}/repo/connect/github`
 - `POST /api/projects/{projectId}/secrets`
@@ -171,6 +175,8 @@ Implemented endpoints:
 - `GET /api/runs/{runId}/artifacts/{artifactId}/content`
 - `GET /api/runs/{runId}/artifacts/{artifactId}/download`
 - `POST /api/runs/{runId}/cancel`
+
+Environment images should be digest-pinned for immutable harness execution (for example `ghcr.io/org/runner@sha256:...`).
 
 ## Prisma
 
