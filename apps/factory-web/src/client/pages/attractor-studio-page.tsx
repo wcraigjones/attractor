@@ -18,6 +18,7 @@ import type {
   AttractorDiagnostic,
   AttractorVersion,
   GlobalAttractor,
+  RunModelConfig,
   RunType
 } from "../lib/types";
 import { lintDotGraph, parseDotGraph, serializeDotGraphCanonical, type DotGraph } from "@attractor/dot-engine";
@@ -113,6 +114,13 @@ function useParsedGraph(content: string): {
 function formatVersionLabel(version: AttractorVersion): string {
   return `v${version.version} • ${new Date(version.createdAt).toLocaleString()}`;
 }
+
+const DEFAULT_ATTRACTOR_MODEL_CONFIG: RunModelConfig = {
+  provider: "anthropic",
+  modelId: "claude-sonnet-4-20250514",
+  reasoningLevel: "high",
+  temperature: 0.2
+};
 
 function GraphSvg(props: {
   graph: DotGraph;
@@ -229,6 +237,11 @@ function AttractorStudioContent(props: {
   const [name, setName] = useState("");
   const [repoPath, setRepoPath] = useState("");
   const [defaultRunType, setDefaultRunType] = useState<RunType>("planning");
+  const [modelProvider, setModelProvider] = useState(DEFAULT_ATTRACTOR_MODEL_CONFIG.provider);
+  const [modelId, setModelId] = useState(DEFAULT_ATTRACTOR_MODEL_CONFIG.modelId);
+  const [reasoningLevel, setReasoningLevel] = useState<
+    "minimal" | "low" | "medium" | "high" | "xhigh"
+  >(DEFAULT_ATTRACTOR_MODEL_CONFIG.reasoningLevel ?? "high");
   const [description, setDescription] = useState("");
   const [active, setActive] = useState(true);
   const [content, setContent] = useState("");
@@ -273,6 +286,10 @@ function AttractorStudioContent(props: {
     setName(attractor.name);
     setRepoPath(attractor.repoPath ?? "");
     setDefaultRunType(attractor.defaultRunType);
+    const nextModelConfig = attractor.modelConfig ?? DEFAULT_ATTRACTOR_MODEL_CONFIG;
+    setModelProvider(nextModelConfig.provider);
+    setModelId(nextModelConfig.modelId);
+    setReasoningLevel(nextModelConfig.reasoningLevel ?? "high");
     setDescription(attractor.description ?? "");
     setActive(attractor.active);
     setContent(detailQuery.data.content ?? "");
@@ -308,7 +325,16 @@ function AttractorStudioContent(props: {
 
   const saveMutation = useMutation({
     mutationFn: async () => {
+      if (!modelProvider.trim() || !modelId.trim()) {
+        throw new Error("Model provider and model id are required");
+      }
       const currentVersion = detailQuery.data?.attractor.contentVersion ?? 0;
+      const modelConfig: RunModelConfig = {
+        provider: modelProvider.trim(),
+        modelId: modelId.trim(),
+        reasoningLevel,
+        temperature: 0.2
+      };
       if (props.scope === "global") {
         return updateGlobalAttractor(props.attractorId, {
           expectedContentVersion: currentVersion,
@@ -316,6 +342,7 @@ function AttractorStudioContent(props: {
           content,
           repoPath: repoPath.trim().length > 0 ? repoPath.trim() : null,
           defaultRunType,
+          modelConfig,
           description: description.trim().length > 0 ? description.trim() : null,
           active
         });
@@ -326,6 +353,7 @@ function AttractorStudioContent(props: {
         content,
         repoPath: repoPath.trim().length > 0 ? repoPath.trim() : null,
         defaultRunType,
+        modelConfig,
         description: description.trim().length > 0 ? description.trim() : null,
         active
       });
@@ -652,6 +680,33 @@ function AttractorStudioContent(props: {
                   <SelectItem value="planning">planning</SelectItem>
                   <SelectItem value="implementation">implementation</SelectItem>
                   <SelectItem value="task">task</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1">
+              <Label>Model Provider</Label>
+              <Input value={modelProvider} onChange={(event) => setModelProvider(event.target.value)} disabled={tab === "viewer"} />
+            </div>
+            <div className="space-y-1">
+              <Label>Model ID</Label>
+              <Input value={modelId} onChange={(event) => setModelId(event.target.value)} disabled={tab === "viewer"} />
+            </div>
+            <div className="space-y-1">
+              <Label>Reasoning</Label>
+              <Select
+                value={reasoningLevel}
+                onValueChange={(value: "minimal" | "low" | "medium" | "high" | "xhigh") => setReasoningLevel(value)}
+                disabled={tab === "viewer"}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="minimal">minimal</SelectItem>
+                  <SelectItem value="low">low</SelectItem>
+                  <SelectItem value="medium">medium</SelectItem>
+                  <SelectItem value="high">high</SelectItem>
+                  <SelectItem value="xhigh">xhigh</SelectItem>
                 </SelectContent>
               </Select>
             </div>

@@ -459,12 +459,26 @@ function hasModel(provider: string, modelId: string): boolean {
   return getModels(provider as never).some((model) => model.id === modelId);
 }
 
+const runModelConfigSchema = z.object({
+  provider: z.string().min(1),
+  modelId: z.string().min(1),
+  reasoningLevel: z.enum(["minimal", "low", "medium", "high", "xhigh"]).optional(),
+  temperature: z.number().optional(),
+  maxTokens: z.number().int().positive().optional()
+});
+
 function normalizeRunModelConfig(config: RunModelConfig): RunModelConfig {
   if (!hasProvider(config.provider)) {
     throw new Error(`Unknown provider: ${config.provider}`);
   }
   if (!hasModel(config.provider, config.modelId)) {
     throw new Error(`Unknown model ${config.modelId} for provider ${config.provider}`);
+  }
+  if (
+    config.reasoningLevel !== undefined &&
+    !["minimal", "low", "medium", "high", "xhigh"].includes(config.reasoningLevel)
+  ) {
+    throw new Error("reasoningLevel must be one of minimal, low, medium, high, xhigh");
   }
   if (config.temperature !== undefined && (config.temperature < 0 || config.temperature > 2)) {
     throw new Error("temperature must be between 0 and 2");
@@ -473,6 +487,17 @@ function normalizeRunModelConfig(config: RunModelConfig): RunModelConfig {
     throw new Error("maxTokens must be a positive integer");
   }
   return config;
+}
+
+function requireAttractorModelConfig(input: {
+  modelConfig: unknown;
+  attractorName: string;
+}): RunModelConfig {
+  const parsed = runModelConfigSchema.safeParse(input.modelConfig);
+  if (!parsed.success) {
+    throw new Error(`Attractor ${input.attractorName} is missing a valid modelConfig`);
+  }
+  return normalizeRunModelConfig(parsed.data);
 }
 
 function isDigestPinnedImage(value: string): boolean {
@@ -709,6 +734,7 @@ async function upsertGlobalAttractorForProject(
     contentPath: string | null;
     contentVersion: number;
     defaultRunType: RunType;
+    modelConfig: unknown | null;
     description: string | null;
     active: boolean;
   }
@@ -726,6 +752,7 @@ async function upsertGlobalAttractorForProject(
       contentPath: attractor.contentPath,
       contentVersion: attractor.contentVersion,
       defaultRunType: attractor.defaultRunType,
+      modelConfig: attractor.modelConfig as never,
       description: attractor.description,
       active: attractor.active
     },
@@ -737,6 +764,7 @@ async function upsertGlobalAttractorForProject(
       contentPath: attractor.contentPath,
       contentVersion: attractor.contentVersion,
       defaultRunType: attractor.defaultRunType,
+      modelConfig: attractor.modelConfig as never,
       description: attractor.description,
       active: attractor.active
     }
@@ -756,6 +784,7 @@ async function propagateGlobalAttractorToAllProjects(attractor: {
   contentPath: string | null;
   contentVersion: number;
   defaultRunType: RunType;
+  modelConfig: unknown | null;
   description: string | null;
   active: boolean;
 }): Promise<void> {
@@ -1991,13 +2020,24 @@ const bootstrapSelfSchema = z.object({
   installationId: z.string().min(1).optional(),
   attractorName: z.string().min(1).default("self-factory"),
   attractorPath: z.string().min(1).default("factory/self-bootstrap.dot"),
-  attractorContent: z.string().min(1).optional()
+  attractorContent: z.string().min(1).optional(),
+  modelConfig: runModelConfigSchema.default({
+    provider: "anthropic",
+    modelId: "claude-sonnet-4-20250514",
+    reasoningLevel: "high",
+    temperature: 0.2
+  })
 });
 
 app.post("/api/bootstrap/self", async (req, res) => {
   const input = bootstrapSelfSchema.safeParse(req.body);
   if (!input.success) {
     return sendError(res, 400, input.error.message);
+  }
+  try {
+    normalizeRunModelConfig(input.data.modelConfig);
+  } catch (error) {
+    return sendError(res, 400, error instanceof Error ? error.message : String(error));
   }
 
   const namespace = input.data.namespace ?? toProjectNamespace(input.data.name);
@@ -2128,6 +2168,7 @@ app.post("/api/bootstrap/self", async (req, res) => {
       contentPath,
       contentVersion,
       defaultRunType: "planning",
+      modelConfig: input.data.modelConfig as never,
       active: true,
       description: "Self-bootstrap attractor pipeline for this repository"
     },
@@ -2139,6 +2180,7 @@ app.post("/api/bootstrap/self", async (req, res) => {
       contentPath,
       contentVersion,
       defaultRunType: "planning",
+      modelConfig: input.data.modelConfig as never,
       active: true,
       description: "Self-bootstrap attractor pipeline for this repository"
     }
@@ -2391,6 +2433,7 @@ const createAttractorSchema = z.object({
   content: z.string().min(1),
   repoPath: z.string().optional(),
   defaultRunType: z.enum(["planning", "implementation", "task"]),
+  modelConfig: runModelConfigSchema,
   description: z.string().optional(),
   active: z.boolean().optional()
 });
@@ -2401,6 +2444,7 @@ const patchAttractorSchema = z
     content: z.string().optional(),
     repoPath: z.string().nullable().optional(),
     defaultRunType: z.enum(["planning", "implementation", "task"]).optional(),
+    modelConfig: runModelConfigSchema.nullable().optional(),
     description: z.string().nullable().optional(),
     active: z.boolean().optional(),
     expectedContentVersion: z.number().int().nonnegative().optional()
@@ -2460,6 +2504,11 @@ app.post("/api/attractors/global", async (req, res) => {
   if (!input.success) {
     return sendError(res, 400, input.error.message);
   }
+  try {
+    normalizeRunModelConfig(input.data.modelConfig);
+  } catch (error) {
+    return sendError(res, 400, error instanceof Error ? error.message : String(error));
+  }
 
   const parsed = parseAndLintAttractorContent(input.data.content);
   if (!parsed.validation.valid) {
@@ -2510,6 +2559,7 @@ app.post("/api/attractors/global", async (req, res) => {
       contentPath,
       contentVersion,
       defaultRunType: input.data.defaultRunType,
+      modelConfig: input.data.modelConfig as never,
       description: input.data.description,
       ...(input.data.active !== undefined ? { active: input.data.active } : {})
     },
@@ -2519,6 +2569,7 @@ app.post("/api/attractors/global", async (req, res) => {
       contentPath,
       contentVersion,
       defaultRunType: input.data.defaultRunType,
+      modelConfig: input.data.modelConfig as never,
       description: input.data.description,
       active: input.data.active ?? true
     }
@@ -2619,6 +2670,13 @@ app.patch("/api/attractors/global/:attractorId", async (req, res) => {
   if (!input.success) {
     return sendError(res, 400, input.error.message);
   }
+  if (input.data.modelConfig !== undefined && input.data.modelConfig !== null) {
+    try {
+      normalizeRunModelConfig(input.data.modelConfig);
+    } catch (error) {
+      return sendError(res, 400, error instanceof Error ? error.message : String(error));
+    }
+  }
 
   const current = await prisma.globalAttractor.findUnique({
     where: { id: req.params.attractorId }
@@ -2700,6 +2758,7 @@ app.patch("/api/attractors/global/:attractorId", async (req, res) => {
         ...(input.data.name !== undefined ? { name: input.data.name } : {}),
         ...(input.data.repoPath !== undefined ? { repoPath: toNullableText(input.data.repoPath ?? undefined) } : {}),
         ...(input.data.defaultRunType !== undefined ? { defaultRunType: input.data.defaultRunType } : {}),
+        ...(input.data.modelConfig !== undefined ? { modelConfig: input.data.modelConfig as never } : {}),
         ...(input.data.description !== undefined ? { description: toNullableText(input.data.description ?? undefined) } : {}),
         ...(input.data.active !== undefined ? { active: input.data.active } : {}),
         ...(input.data.content !== undefined
@@ -2731,6 +2790,11 @@ app.post("/api/projects/:projectId/attractors", async (req, res) => {
   const input = createAttractorSchema.safeParse(req.body);
   if (!input.success) {
     return sendError(res, 400, input.error.message);
+  }
+  try {
+    normalizeRunModelConfig(input.data.modelConfig);
+  } catch (error) {
+    return sendError(res, 400, error instanceof Error ? error.message : String(error));
   }
 
   const parsed = parseAndLintAttractorContent(input.data.content);
@@ -2793,6 +2857,7 @@ app.post("/api/projects/:projectId/attractors", async (req, res) => {
       contentPath,
       contentVersion,
       defaultRunType: input.data.defaultRunType,
+      modelConfig: input.data.modelConfig as never,
       description: input.data.description,
       ...(input.data.active !== undefined ? { active: input.data.active } : {})
     },
@@ -2804,6 +2869,7 @@ app.post("/api/projects/:projectId/attractors", async (req, res) => {
       contentPath,
       contentVersion,
       defaultRunType: input.data.defaultRunType,
+      modelConfig: input.data.modelConfig as never,
       description: input.data.description,
       active: input.data.active ?? true
     }
@@ -2962,6 +3028,13 @@ app.patch("/api/projects/:projectId/attractors/:attractorId", async (req, res) =
   if (!input.success) {
     return sendError(res, 400, input.error.message);
   }
+  if (input.data.modelConfig !== undefined && input.data.modelConfig !== null) {
+    try {
+      normalizeRunModelConfig(input.data.modelConfig);
+    } catch (error) {
+      return sendError(res, 400, error instanceof Error ? error.message : String(error));
+    }
+  }
 
   const current = await prisma.attractorDef.findFirst({
     where: {
@@ -3050,6 +3123,7 @@ app.patch("/api/projects/:projectId/attractors/:attractorId", async (req, res) =
         ...(input.data.name !== undefined ? { name: input.data.name } : {}),
         ...(input.data.repoPath !== undefined ? { repoPath: toNullableText(input.data.repoPath ?? undefined) } : {}),
         ...(input.data.defaultRunType !== undefined ? { defaultRunType: input.data.defaultRunType } : {}),
+        ...(input.data.modelConfig !== undefined ? { modelConfig: input.data.modelConfig as never } : {}),
         ...(input.data.description !== undefined ? { description: toNullableText(input.data.description ?? undefined) } : {}),
         ...(input.data.active !== undefined ? { active: input.data.active } : {}),
         ...(input.data.content !== undefined
@@ -3096,13 +3170,6 @@ const createRunSchema = z.object({
   sourceBranch: z.string().min(1),
   targetBranch: z.string().min(1),
   specBundleId: z.string().optional(),
-  modelConfig: z.object({
-    provider: z.string().min(1),
-    modelId: z.string().min(1),
-    reasoningLevel: z.enum(["minimal", "low", "medium", "high", "xhigh"]).optional(),
-    temperature: z.number().optional(),
-    maxTokens: z.number().int().positive().optional()
-  }),
   force: z.boolean().optional()
 });
 
@@ -3112,24 +3179,9 @@ app.post("/api/runs", async (req, res) => {
     return sendError(res, 400, input.error.message);
   }
 
-  try {
-    normalizeRunModelConfig(input.data.modelConfig);
-  } catch (error) {
-    return sendError(res, 400, error instanceof Error ? error.message : String(error));
-  }
-
   const project = await prisma.project.findUnique({ where: { id: input.data.projectId } });
   if (!project) {
     return sendError(res, 404, "project not found");
-  }
-
-  const providerSecretExists = await hasEffectiveProviderSecret(project.id, input.data.modelConfig.provider);
-  if (!providerSecretExists) {
-    return sendError(
-      res,
-      409,
-      `Missing provider secret for ${input.data.modelConfig.provider}. Configure it in Project Secret or Global Secret UI first.`
-    );
   }
 
   const attractorDef = await prisma.attractorDef.findUnique({ where: { id: input.data.attractorDefId } });
@@ -3138,6 +3190,24 @@ app.post("/api/runs", async (req, res) => {
   }
   if (!attractorDef.active) {
     return sendError(res, 409, "attractor definition is inactive");
+  }
+  let modelConfig: RunModelConfig;
+  try {
+    modelConfig = requireAttractorModelConfig({
+      modelConfig: attractorDef.modelConfig,
+      attractorName: attractorDef.name
+    });
+  } catch (error) {
+    return sendError(res, 409, error instanceof Error ? error.message : String(error));
+  }
+
+  const providerSecretExists = await hasEffectiveProviderSecret(project.id, modelConfig.provider);
+  if (!providerSecretExists) {
+    return sendError(
+      res,
+      409,
+      `Missing provider secret for ${modelConfig.provider}. Configure it in Project Secret or Global Secret UI first.`
+    );
   }
 
   let attractorSnapshot;
@@ -3240,7 +3310,7 @@ app.post("/api/runs", async (req, res) => {
     targetBranch: run.targetBranch,
     dotImplementationWithoutSpecBundle,
     attractorSnapshot,
-    modelConfig: input.data.modelConfig,
+    modelConfig,
     environment: resolvedEnvironment.snapshot,
     runnerImage: resolvedEnvironment.snapshot.runnerImage
   });
@@ -3257,13 +3327,6 @@ const createIssueRunSchema = z.object({
   sourceBranch: z.string().min(1).optional(),
   targetBranch: z.string().min(1).optional(),
   specBundleId: z.string().optional(),
-  modelConfig: z.object({
-    provider: z.string().min(1),
-    modelId: z.string().min(1),
-    reasoningLevel: z.enum(["minimal", "low", "medium", "high", "xhigh"]).optional(),
-    temperature: z.number().optional(),
-    maxTokens: z.number().int().positive().optional()
-  }),
   force: z.boolean().optional()
 });
 
@@ -3276,12 +3339,6 @@ app.post("/api/projects/:projectId/github/issues/:issueNumber/runs", async (req,
   const input = createIssueRunSchema.safeParse(req.body);
   if (!input.success) {
     return sendError(res, 400, input.error.message);
-  }
-
-  try {
-    normalizeRunModelConfig(input.data.modelConfig);
-  } catch (error) {
-    return sendError(res, 400, error instanceof Error ? error.message : String(error));
   }
 
   const [project, issue] = await Promise.all([
@@ -3306,15 +3363,6 @@ app.post("/api/projects/:projectId/github/issues/:issueNumber/runs", async (req,
     return sendError(res, 409, "issue must be open to launch a run");
   }
 
-  const providerSecretExists = await hasEffectiveProviderSecret(project.id, input.data.modelConfig.provider);
-  if (!providerSecretExists) {
-    return sendError(
-      res,
-      409,
-      `Missing provider secret for ${input.data.modelConfig.provider}. Configure it in Project Secret or Global Secret UI first.`
-    );
-  }
-
   const attractorDef = await prisma.attractorDef.findUnique({
     where: { id: input.data.attractorDefId }
   });
@@ -3323,6 +3371,24 @@ app.post("/api/projects/:projectId/github/issues/:issueNumber/runs", async (req,
   }
   if (!attractorDef.active) {
     return sendError(res, 409, "attractor definition is inactive");
+  }
+  let modelConfig: RunModelConfig;
+  try {
+    modelConfig = requireAttractorModelConfig({
+      modelConfig: attractorDef.modelConfig,
+      attractorName: attractorDef.name
+    });
+  } catch (error) {
+    return sendError(res, 409, error instanceof Error ? error.message : String(error));
+  }
+
+  const providerSecretExists = await hasEffectiveProviderSecret(project.id, modelConfig.provider);
+  if (!providerSecretExists) {
+    return sendError(
+      res,
+      409,
+      `Missing provider secret for ${modelConfig.provider}. Configure it in Project Secret or Global Secret UI first.`
+    );
   }
 
   let attractorSnapshot;
@@ -3402,7 +3468,7 @@ app.post("/api/projects/:projectId/github/issues/:issueNumber/runs", async (req,
     targetBranch: run.targetBranch,
     dotImplementationWithoutSpecBundle,
     attractorSnapshot,
-    modelConfig: input.data.modelConfig,
+    modelConfig,
     environment: resolvedEnvironment.snapshot,
     runnerImage: resolvedEnvironment.snapshot.runnerImage,
     githubIssue: run.githubIssue
@@ -3431,13 +3497,6 @@ const selfIterateSchema = z.object({
   environmentId: z.string().min(1).optional(),
   sourceBranch: z.string().min(1),
   targetBranch: z.string().min(1),
-  modelConfig: z.object({
-    provider: z.string().min(1),
-    modelId: z.string().min(1),
-    reasoningLevel: z.enum(["minimal", "low", "medium", "high", "xhigh"]).optional(),
-    temperature: z.number().optional(),
-    maxTokens: z.number().int().positive().optional()
-  }),
   force: z.boolean().optional()
 });
 
@@ -3447,24 +3506,9 @@ app.post("/api/projects/:projectId/self-iterate", async (req, res) => {
     return sendError(res, 400, input.error.message);
   }
 
-  try {
-    normalizeRunModelConfig(input.data.modelConfig);
-  } catch (error) {
-    return sendError(res, 400, error instanceof Error ? error.message : String(error));
-  }
-
   const project = await prisma.project.findUnique({ where: { id: req.params.projectId } });
   if (!project) {
     return sendError(res, 404, "project not found");
-  }
-
-  const providerSecretExists = await hasEffectiveProviderSecret(project.id, input.data.modelConfig.provider);
-  if (!providerSecretExists) {
-    return sendError(
-      res,
-      409,
-      `Missing provider secret for ${input.data.modelConfig.provider}. Configure it in Project Secret or Global Secret UI first.`
-    );
   }
 
   const attractorDef = await prisma.attractorDef.findUnique({ where: { id: input.data.attractorDefId } });
@@ -3473,6 +3517,24 @@ app.post("/api/projects/:projectId/self-iterate", async (req, res) => {
   }
   if (!attractorDef.active) {
     return sendError(res, 409, "attractor definition is inactive");
+  }
+  let modelConfig: RunModelConfig;
+  try {
+    modelConfig = requireAttractorModelConfig({
+      modelConfig: attractorDef.modelConfig,
+      attractorName: attractorDef.name
+    });
+  } catch (error) {
+    return sendError(res, 409, error instanceof Error ? error.message : String(error));
+  }
+
+  const providerSecretExists = await hasEffectiveProviderSecret(project.id, modelConfig.provider);
+  if (!providerSecretExists) {
+    return sendError(
+      res,
+      409,
+      `Missing provider secret for ${modelConfig.provider}. Configure it in Project Secret or Global Secret UI first.`
+    );
   }
 
   let attractorSnapshot;
@@ -3556,7 +3618,7 @@ app.post("/api/projects/:projectId/self-iterate", async (req, res) => {
     projectId: run.projectId,
     targetBranch: run.targetBranch,
     attractorSnapshot,
-    modelConfig: input.data.modelConfig,
+    modelConfig,
     environment: resolvedEnvironment.snapshot,
     runnerImage: resolvedEnvironment.snapshot.runnerImage,
     sourcePlanningRunId: latestPlanningRun.id,
@@ -4214,7 +4276,8 @@ app.get("/api/projects/:projectId/github/issues/:issueNumber", async (req, res) 
       attractorOptions: attractors.map((attractor) => ({
         id: attractor.id,
         name: attractor.name,
-        defaultRunType: attractor.defaultRunType
+        defaultRunType: attractor.defaultRunType,
+        modelConfig: attractor.modelConfig
       }))
     }
   });

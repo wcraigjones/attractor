@@ -625,6 +625,13 @@ async function runCommand(command: string, args: string[], cwd: string): Promise
   return `${result.stdout ?? ""}${result.stderr ?? ""}`;
 }
 
+async function configureRepositoryGitIdentity(cwd: string): Promise<void> {
+  const authorName = (process.env.RUN_GIT_AUTHOR_NAME ?? "Attractor Factory Bot").trim();
+  const authorEmail = (process.env.RUN_GIT_AUTHOR_EMAIL ?? "factory-bot@attractor.local").trim();
+  await runCommand("git", ["config", "user.name", authorName], cwd);
+  await runCommand("git", ["config", "user.email", authorEmail], cwd);
+}
+
 async function hasStagedChanges(cwd: string): Promise<boolean> {
   try {
     await execFileAsync("git", ["diff", "--cached", "--quiet"], { cwd });
@@ -651,6 +658,7 @@ async function checkoutRepository(
     ["clone", "--depth", "1", "--branch", sourceBranch, gitRemote(repoFullName, token), workDir],
     tmpdir()
   );
+  await configureRepositoryGitIdentity(workDir);
   return workDir;
 }
 
@@ -1318,7 +1326,19 @@ async function applyImplementationResult(args: {
         runId: run.id,
         message: error instanceof Error ? error.message : String(error)
       });
-      throw error;
+      try {
+        await runCommand("git", ["apply", "--index", "--recount", "--unidiff-zero", patchFile], args.workDir);
+        await appendRunEvent(run.id, "ImplementationPatchApplyRetried", {
+          runId: run.id,
+          mode: "recount-unidiff-zero"
+        });
+      } catch (retryError) {
+        await appendRunEvent(run.id, "ImplementationPatchApplyRetryFailed", {
+          runId: run.id,
+          message: retryError instanceof Error ? retryError.message : String(retryError)
+        });
+        throw retryError;
+      }
     }
 
     const patchArtifactPath = `runs/${run.projectId}/${run.id}/implementation.patch`;

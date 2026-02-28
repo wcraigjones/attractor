@@ -7,9 +7,7 @@ import {
   getProjectGitHubIssue,
   launchIssueRun,
   listEnvironments,
-  listModels,
-  listProjects,
-  listProviders
+  listProjects
 } from "../lib/api";
 import { getInactiveDefaultEnvironment, listActiveEnvironments } from "../lib/environments-view";
 import type { RunType } from "../lib/types";
@@ -29,8 +27,6 @@ export function ProjectGitHubIssueDetailPage() {
   const navigate = useNavigate();
   const projectId = params.projectId ?? "";
   const issueNumber = Number.parseInt(params.issueNumber ?? "", 10);
-  const [provider, setProvider] = useState("openai");
-  const [modelId, setModelId] = useState("");
   const [runType, setRunType] = useState<RunType>("implementation");
   const [attractorDefId, setAttractorDefId] = useState("");
   const [sourceBranch, setSourceBranch] = useState("main");
@@ -42,12 +38,6 @@ export function ProjectGitHubIssueDetailPage() {
     queryKey: ["github-issue", projectId, issueNumber],
     queryFn: () => getProjectGitHubIssue(projectId, issueNumber),
     enabled: projectId.length > 0 && Number.isInteger(issueNumber) && issueNumber > 0
-  });
-  const providersQuery = useQuery({ queryKey: ["providers"], queryFn: listProviders });
-  const modelsQuery = useQuery({
-    queryKey: ["models", provider],
-    queryFn: () => listModels(provider),
-    enabled: provider.length > 0
   });
   const environmentsQuery = useQuery({
     queryKey: ["environments"],
@@ -83,13 +73,7 @@ export function ProjectGitHubIssueDetailPage() {
         runType,
         sourceBranch,
         targetBranch,
-        ...(specBundleId.trim().length > 0 ? { specBundleId: specBundleId.trim() } : {}),
-        modelConfig: {
-          provider,
-          modelId,
-          reasoningLevel: "high",
-          temperature: 0.2
-        }
+        ...(specBundleId.trim().length > 0 ? { specBundleId: specBundleId.trim() } : {})
       }),
     onSuccess: (payload) => {
       toast.success(`Run queued: ${payload.runId}`);
@@ -102,6 +86,10 @@ export function ProjectGitHubIssueDetailPage() {
 
   const linkedRuns = useMemo(() => detailQuery.data?.runs ?? [], [detailQuery.data?.runs]);
   const linkedPullRequests = useMemo(() => detailQuery.data?.pullRequests ?? [], [detailQuery.data?.pullRequests]);
+  const selectedAttractor = useMemo(
+    () => detailQuery.data?.launchDefaults.attractorOptions.find((item) => item.id === attractorDefId) ?? null,
+    [attractorDefId, detailQuery.data?.launchDefaults.attractorOptions]
+  );
   const activeEnvironments = useMemo(
     () => listActiveEnvironments(environmentsQuery.data ?? []),
     [environmentsQuery.data]
@@ -171,8 +159,12 @@ export function ProjectGitHubIssueDetailPage() {
               className="space-y-3"
               onSubmit={(event) => {
                 event.preventDefault();
-                if (!attractorDefId || !modelId) {
-                  toast.error("Attractor and model are required");
+                if (!attractorDefId) {
+                  toast.error("Attractor is required");
+                  return;
+                }
+                if (!selectedAttractor?.modelConfig?.provider || !selectedAttractor?.modelConfig?.modelId) {
+                  toast.error("Selected attractor is missing model configuration");
                   return;
                 }
                 launchMutation.mutate();
@@ -226,41 +218,16 @@ export function ProjectGitHubIssueDetailPage() {
               </div>
 
               <div className="space-y-1">
-                <Label>Provider</Label>
-                <Select
-                  value={provider}
-                  onValueChange={(value) => {
-                    setProvider(value);
-                    setModelId("");
-                  }}
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select provider" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {(providersQuery.data ?? []).map((item) => (
-                      <SelectItem key={item} value={item}>
-                        {item}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="space-y-1">
-                <Label>Model</Label>
-                <Select value={modelId || undefined} onValueChange={setModelId}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select model" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {(modelsQuery.data ?? []).map((model) => (
-                      <SelectItem key={model.id} value={model.id}>
-                        {model.id}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <Label>Model (from Attractor)</Label>
+                <Input
+                  value={
+                    selectedAttractor?.modelConfig
+                      ? `${selectedAttractor.modelConfig.provider} / ${selectedAttractor.modelConfig.modelId}`
+                      : ""
+                  }
+                  placeholder="Select an attractor with model config"
+                  disabled
+                />
               </div>
 
               <div className="space-y-1">
