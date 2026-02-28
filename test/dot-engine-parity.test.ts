@@ -212,4 +212,67 @@ describe("DOT engine parity behavior", () => {
     expect(criticalCalls).toBe(2);
     expect(result.state.nodeOutcomes.critical?.status).toBe("SUCCESS");
   });
+
+  it("derives wait.human options from outgoing edges", async () => {
+    const graph = parseDotGraph(`
+      digraph human_gate {
+        start [shape=Mdiamond];
+        gate [shape=hexagon, type="wait.human", label="Approve?"];
+        approve [shape=box, prompt="approved"];
+        reject [shape=box, prompt="rejected"];
+        done [shape=Msquare];
+
+        start -> gate;
+        gate -> approve [label="[A] Approve"];
+        gate -> reject [label="[R] Reject"];
+        approve -> done;
+        reject -> done;
+      }
+    `);
+
+    let askedOptions: string[] = [];
+    const result = await executeGraph({
+      graph,
+      callbacks: {
+        codergen: async ({ node }) => `${node.id}-ok`,
+        waitForHuman: async (question) => {
+          askedOptions = question.options ?? [];
+          return "A";
+        }
+      }
+    });
+
+    expect(result.exitNodeId).toBe("done");
+    expect(askedOptions).toEqual(["[A] [A] Approve", "[R] [R] Reject"]);
+    expect(result.state.nodeOutcomes.gate?.suggestedNextIds).toEqual(["approve"]);
+    expect(result.state.nodeOutputs.approve).toBe("approve-ok");
+  });
+
+  it("executes custom handlers by explicit type", async () => {
+    const graph = parseDotGraph(`
+      digraph custom_handler {
+        start [shape=Mdiamond];
+        enrich [shape=box, type="my_custom"];
+        done [shape=Msquare];
+        start -> enrich -> done;
+      }
+    `);
+
+    const result = await executeGraph({
+      graph,
+      callbacks: {
+        codergen: async () => "unused",
+        customHandlers: {
+          my_custom: async () => ({
+            status: "success",
+            output: "custom-output",
+            context_updates: { "context.enriched": "true" }
+          })
+        }
+      }
+    });
+
+    expect(result.state.nodeOutputs.enrich).toBe("custom-output");
+    expect(result.state.context["context.enriched"]).toBe("true");
+  });
 });

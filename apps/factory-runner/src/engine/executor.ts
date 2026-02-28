@@ -416,6 +416,7 @@ async function saveOutcome(
 
 async function executeNodeAttempt(
   node: DotNode,
+  graph: DotGraph,
   state: EngineState,
   callbacks: EngineCallbacks
 ): Promise<NodeOutcome> {
@@ -456,24 +457,98 @@ async function executeNodeAttempt(
         failureReason: `waitForHuman callback is not configured for node ${node.id}`
       };
     }
+
+    const edges = outgoingEdges(graph, node.id);
+    if (edges.length === 0) {
+      return {
+        status: "FAIL",
+        failureReason: `No outgoing edges for human gate node ${node.id}`
+      };
+    }
+
+    const choices = edges.map((edge) => {
+      const label = edge.label || edge.to;
+      const keyFromBracket = label.match(/^\[([A-Za-z0-9])\]\s*/)?.[1];
+      const keyFromParen = label.match(/^([A-Za-z0-9])\)\s*/)?.[1];
+      const keyFromDash = label.match(/^([A-Za-z0-9])\s*-\s*/)?.[1];
+      const key = (keyFromBracket ?? keyFromParen ?? keyFromDash ?? label[0] ?? "")
+        .toUpperCase();
+      return {
+        key,
+        label,
+        to: edge.to
+      };
+    });
+
     const question: HumanQuestion = {
       nodeId: node.id,
       prompt: node.prompt || node.label || node.id,
-      options: parseOptions(node.attrs.options),
+      options: choices.map((choice) => `[${choice.key}] ${choice.label}`),
       timeoutMs: parseDurationMs(node.attrs.timeout)
     };
     const result = await callbacks.waitForHuman(question);
     const normalized = normalizeHandlerResult(result, { status: "SUCCESS" });
+
+    if (typeof result === "object" && result && "status" in result) {
+      return normalized;
+    }
+
+    const rawAnswer = typeof result === "string" ? result.trim() : "";
+    const defaultChoiceTarget = node.attrs["human.default_choice"]?.trim();
+
+    if (!rawAnswer || rawAnswer.toUpperCase() === "TIMEOUT") {
+      if (defaultChoiceTarget) {
+        const fallbackChoice = choices.find((choice) => choice.to === defaultChoiceTarget);
+        if (fallbackChoice) {
+          return {
+            status: "SUCCESS",
+            preferredLabel: fallbackChoice.label,
+            suggestedNextIds: [fallbackChoice.to],
+            contextUpdates: {
+              "human.gate.selected": fallbackChoice.key,
+              "human.gate.label": fallbackChoice.label,
+              "human.gate.target": fallbackChoice.to
+            },
+            notes: "human timeout, default choice selected"
+          };
+        }
+      }
+      return {
+        status: "RETRY",
+        failureReason: "human gate timeout with no default choice"
+      };
+    }
+
+    const selected =
+      choices.find((choice) => choice.to === rawAnswer) ??
+      choices.find((choice) => choice.label === rawAnswer) ??
+      choices.find((choice) => choice.key === rawAnswer.toUpperCase()) ??
+      choices[0];
+
+    if (!selected) {
+      return {
+        status: "FAIL",
+        failureReason: `No selectable choices for human gate node ${node.id}`
+      };
+    }
+
+    const outcome: NodeOutcome = {
+      status: "SUCCESS",
+      preferredLabel: selected.label,
+      suggestedNextIds: [selected.to],
+      contextUpdates: {
+        "human.gate.selected": selected.key,
+        "human.gate.label": selected.label,
+        "human.gate.target": selected.to
+      },
+      notes: "human gate response captured"
+    };
     if (
       typeof result === "string" &&
       !normalized.preferredLabel &&
       !normalized.suggestedNextIds
     ) {
-      return {
-        ...normalized,
-        preferredLabel: result,
-        suggestedNextIds: [result]
-      };
+      return outcome;
     }
     return normalized;
   }
@@ -510,7 +585,7 @@ async function executeNodeWithRetry(
     await emit(callbacks, "NodeStarted", node.id, { type: node.type, attempt });
 
     try {
-      const outcome = await executeNodeAttempt(node, state, callbacks);
+      const outcome = await executeNodeAttempt(node, graph, state, callbacks);
 
       await saveOutcome(
         callbacks,
