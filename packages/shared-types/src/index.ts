@@ -68,7 +68,9 @@ export interface AttractorDef {
   id: string;
   projectId: string;
   name: string;
-  repoPath: string;
+  repoPath: string | null;
+  contentPath: string | null;
+  contentVersion: number;
   defaultRunType: RunType;
   description: string | null;
   active: boolean;

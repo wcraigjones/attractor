@@ -206,7 +206,8 @@ export async function listGlobalAttractors(): Promise<GlobalAttractor[]> {
 
 export async function upsertGlobalAttractor(input: {
   name: string;
-  repoPath: string;
+  content: string;
+  repoPath?: string;
   defaultRunType: "planning" | "implementation" | "task";
   description?: string;
   active?: boolean;
@@ -221,7 +222,8 @@ export async function createAttractor(
   projectId: string,
   input: {
     name: string;
-    repoPath: string;
+    content: string;
+    repoPath?: string;
     defaultRunType: "planning" | "implementation" | "task";
     description?: string;
     active?: boolean;
