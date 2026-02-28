@@ -28,6 +28,7 @@ import { z } from "zod";
 import {
   type EnvironmentResources,
   type RunExecutionEnvironment,
+  attractorUsesDotImplementation,
   runCancelKey,
   runEventChannel,
   runLockKey,
@@ -165,6 +166,19 @@ async function getObjectText(key: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+async function attractorSupportsDotImplementation(attractor: {
+  contentPath: string | null;
+}): Promise<boolean> {
+  if (!attractor.contentPath) {
+    return false;
+  }
+  const content = await getObjectText(attractor.contentPath);
+  if (!content) {
+    return false;
+  }
+  return attractorUsesDotImplementation(content);
 }
 
 let attractorBucketReady = false;
@@ -1906,8 +1920,18 @@ app.post("/api/runs", async (req, res) => {
     return sendError(res, 400, "task runs must not set specBundleId");
   }
 
+  let dotImplementationWithoutSpecBundle = false;
   if (input.data.runType === "implementation" && !input.data.specBundleId) {
-    return sendError(res, 400, "implementation runs require specBundleId");
+    dotImplementationWithoutSpecBundle = await attractorSupportsDotImplementation({
+      contentPath: attractorDef.contentPath
+    });
+    if (!dotImplementationWithoutSpecBundle) {
+      return sendError(
+        res,
+        400,
+        "implementation runs require specBundleId unless the attractor enables DOT implementation mode"
+      );
+    }
   }
 
   if (input.data.specBundleId) {
@@ -1961,7 +1985,7 @@ app.post("/api/runs", async (req, res) => {
       sourceBranch: input.data.sourceBranch,
       targetBranch: input.data.targetBranch,
       status: RunStatus.QUEUED,
-      specBundleId: input.data.specBundleId
+      specBundleId: dotImplementationWithoutSpecBundle ? null : input.data.specBundleId
     }
   });
 
@@ -1970,6 +1994,7 @@ app.post("/api/runs", async (req, res) => {
     runType: run.runType,
     projectId: run.projectId,
     targetBranch: run.targetBranch,
+    dotImplementationWithoutSpecBundle,
     modelConfig: input.data.modelConfig,
     environment: resolvedEnvironment.snapshot,
     runnerImage: resolvedEnvironment.snapshot.runnerImage
@@ -2056,20 +2081,26 @@ app.post("/api/projects/:projectId/github/issues/:issueNumber/runs", async (req,
   }
 
   let resolvedSpecBundleId = input.data.specBundleId;
+  let dotImplementationWithoutSpecBundle = false;
   if (input.data.runType === "implementation" && !resolvedSpecBundleId) {
-    const latestPlanningRun = await prisma.run.findFirst({
-      where: {
-        projectId: project.id,
-        runType: RunType.planning,
-        status: RunStatus.SUCCEEDED,
-        specBundleId: { not: null }
-      },
-      orderBy: { finishedAt: "desc" }
+    dotImplementationWithoutSpecBundle = await attractorSupportsDotImplementation({
+      contentPath: attractorDef.contentPath
     });
-    if (!latestPlanningRun?.specBundleId) {
-      return sendError(res, 409, "no successful planning run with a spec bundle is available");
+    if (!dotImplementationWithoutSpecBundle) {
+      const latestPlanningRun = await prisma.run.findFirst({
+        where: {
+          projectId: project.id,
+          runType: RunType.planning,
+          status: RunStatus.SUCCEEDED,
+          specBundleId: { not: null }
+        },
+        orderBy: { finishedAt: "desc" }
+      });
+      if (!latestPlanningRun?.specBundleId) {
+        return sendError(res, 409, "no successful planning run with a spec bundle is available");
+      }
+      resolvedSpecBundleId = latestPlanningRun.specBundleId;
     }
-    resolvedSpecBundleId = latestPlanningRun.specBundleId;
   }
 
   let resolvedEnvironment;
@@ -2108,6 +2139,7 @@ app.post("/api/projects/:projectId/github/issues/:issueNumber/runs", async (req,
     runType: run.runType,
     projectId: run.projectId,
     targetBranch: run.targetBranch,
+    dotImplementationWithoutSpecBundle,
     modelConfig: input.data.modelConfig,
     environment: resolvedEnvironment.snapshot,
     runnerImage: resolvedEnvironment.snapshot.runnerImage,

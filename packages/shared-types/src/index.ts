@@ -230,3 +230,5 @@ export function runEventChannel(runId: string): string {
 export function runCancelKey(runId: string): string {
   return `runs:cancel:${runId}`;
 }
+
+export { attractorUsesDotImplementation } from "./dot-implementation.js";

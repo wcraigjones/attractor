@@ -28,6 +28,7 @@ import {
   runCancelKey,
   runEventChannel,
   runLockKey,
+  attractorUsesDotImplementation,
   type RunModelConfig,
   type RunExecutionEnvironment,
   type RunExecutionSpec
@@ -39,6 +40,7 @@ import {
   parseDotGraph,
   parseModelStylesheet,
   validateDotGraph,
+  type DotGraph,
   type DotNode,
   type EngineState
 } from "./engine/index.js";
@@ -1059,6 +1061,324 @@ function resolveTaskNodeOutput(
   return "";
 }
 
+function parseBoolAttr(value: string | undefined): boolean {
+  if (!value) {
+    return false;
+  }
+  const normalized = value.trim().toLowerCase();
+  return normalized === "true" || normalized === "1" || normalized === "yes" || normalized === "on";
+}
+
+function isDotImplementationGraph(graph: DotGraph): boolean {
+  const mode = (
+    graph.graphAttrs.implementation_mode ??
+    graph.graphAttrs.implementationMode ??
+    ""
+  )
+    .trim()
+    .toLowerCase();
+  if (mode === "dot" || mode === "workflow" || mode === "graph") {
+    return true;
+  }
+  if (
+    parseBoolAttr(graph.graphAttrs.implementation_dot ?? graph.graphAttrs.implementationDot)
+  ) {
+    return true;
+  }
+  if (
+    (graph.graphAttrs.implementation_patch_node ?? graph.graphAttrs.implementationPatchNode)?.trim()
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function isDotImplementationAttractor(attractorContent: string): boolean {
+  if (!attractorUsesDotImplementation(attractorContent)) {
+    return false;
+  }
+  try {
+    const parsed = parseDotGraph(attractorContent);
+    return isDotImplementationGraph(parsed);
+  } catch {
+    return false;
+  }
+}
+
+function firstOutputNodeId(
+  graph: DotGraph,
+  state: EngineState,
+  preferredIds: Array<string | undefined>
+): string | null {
+  for (const rawId of preferredIds) {
+    const nodeId = rawId?.trim() ?? "";
+    if (!nodeId) {
+      continue;
+    }
+    const output = resolveTaskNodeOutput(graph, state, nodeId);
+    if (output.trim().length > 0) {
+      return nodeId;
+    }
+  }
+  return null;
+}
+
+function selectImplementationPatchNodeId(graph: DotGraph, state: EngineState): string | null {
+  const preferred = [
+    graph.graphAttrs.implementation_patch_node,
+    graph.graphAttrs.implementationPatchNode,
+    graph.graphAttrs.patch_node,
+    graph.graphAttrs.patchNode,
+    graph.graphAttrs.final_output_node,
+    graph.graphAttrs.finalOutputNode
+  ];
+
+  const preferredWithOutput = firstOutputNodeId(graph, state, preferred);
+  if (preferredWithOutput) {
+    const preferredOutput = resolveTaskNodeOutput(graph, state, preferredWithOutput);
+    if (extractUnifiedDiff(preferredOutput)) {
+      return preferredWithOutput;
+    }
+  }
+
+  for (let index = graph.nodeOrder.length - 1; index >= 0; index -= 1) {
+    const nodeId = graph.nodeOrder[index] ?? "";
+    const output = resolveTaskNodeOutput(graph, state, nodeId);
+    if (!output || output.trim().length === 0) {
+      continue;
+    }
+    if (extractUnifiedDiff(output)) {
+      return nodeId;
+    }
+  }
+
+  return preferredWithOutput;
+}
+
+function selectImplementationSummaryNodeId(
+  graph: DotGraph,
+  state: EngineState,
+  patchNodeId: string | null
+): string | null {
+  const preferred = [
+    graph.graphAttrs.implementation_summary_node,
+    graph.graphAttrs.implementationSummaryNode,
+    graph.graphAttrs.final_output_node,
+    graph.graphAttrs.finalOutputNode,
+    graph.graphAttrs.synthesis_node,
+    graph.graphAttrs.synthesisNode,
+    patchNodeId ?? undefined
+  ];
+  const selected = firstOutputNodeId(graph, state, preferred);
+  if (selected) {
+    return selected;
+  }
+  return selectFinalOutputNodeId(graph, state);
+}
+
+type ImplementationRunRecord = {
+  id: string;
+  projectId: string;
+  sourceBranch: string;
+  targetBranch: string;
+  githubIssueId: string | null;
+  githubPullRequestId: string | null;
+  project: {
+    repoFullName: string | null;
+    defaultBranch: string | null;
+    githubInstallationId: string | null;
+  };
+  githubIssue: {
+    issueNumber: number;
+    title: string;
+    url: string;
+    body: string | null;
+  } | null;
+};
+
+type SupplementalArtifact = {
+  key: string;
+  content: string;
+  nodeId?: string | null;
+};
+
+async function applyImplementationResult(args: {
+  run: ImplementationRunRecord;
+  workDir: string;
+  implementationText: string;
+  supplementalArtifacts?: SupplementalArtifact[];
+}): Promise<{ prUrl: string | null; prNumber: number | null; githubPullRequestId: string | null }> {
+  const run = args.run;
+  const implementationText = args.implementationText;
+  const supplementalArtifacts = args.supplementalArtifacts ?? [];
+
+  await runCommand("git", ["checkout", "-B", run.targetBranch], args.workDir);
+
+  const outputDir = join(args.workDir, ".attractor");
+  mkdirSync(outputDir, { recursive: true });
+  const outputFile = join(outputDir, `implementation-${run.id}.md`);
+  writeFileSync(outputFile, implementationText, "utf8");
+
+  await runCommand("git", ["add", outputFile], args.workDir);
+
+  const extractedDiff = extractUnifiedDiff(implementationText);
+  if (extractedDiff) {
+    await appendRunEvent(run.id, "ImplementationPatchExtracted", {
+      runId: run.id,
+      bytes: Buffer.byteLength(extractedDiff, "utf8")
+    });
+    const patchFile = join(outputDir, `implementation-${run.id}.patch`);
+    writeFileSync(patchFile, extractedDiff, "utf8");
+
+    try {
+      await runCommand("git", ["apply", "--index", patchFile], args.workDir);
+    } catch (error) {
+      await appendRunEvent(run.id, "ImplementationPatchApplyFailed", {
+        runId: run.id,
+        message: error instanceof Error ? error.message : String(error)
+      });
+      throw error;
+    }
+
+    const patchArtifactPath = `runs/${run.projectId}/${run.id}/implementation.patch`;
+    await putObject(patchArtifactPath, extractedDiff, "text/x-diff");
+    await prisma.artifact.create({
+      data: {
+        runId: run.id,
+        key: "implementation.patch",
+        path: patchArtifactPath,
+        contentType: "text/x-diff",
+        sizeBytes: Buffer.byteLength(extractedDiff, "utf8")
+      }
+    });
+
+    await appendRunEvent(run.id, "ImplementationPatchApplied", {
+      runId: run.id,
+      patchArtifactPath
+    });
+  } else {
+    await appendRunEvent(run.id, "ImplementationPatchMissing", {
+      runId: run.id
+    });
+  }
+
+  for (const artifact of supplementalArtifacts) {
+    const path = `runs/${run.projectId}/${run.id}/${artifact.key}`;
+    await putObject(path, artifact.content, "text/markdown");
+    await prisma.artifact.create({
+      data: {
+        runId: run.id,
+        key: artifact.key,
+        path,
+        contentType: "text/markdown",
+        sizeBytes: Buffer.byteLength(artifact.content, "utf8")
+      }
+    });
+    await appendRunEvent(run.id, "ImplementationNodeArtifactWritten", {
+      runId: run.id,
+      nodeId: artifact.nodeId ?? null,
+      artifactKey: artifact.key,
+      artifactPath: path
+    });
+  }
+
+  if (!(await hasStagedChanges(args.workDir))) {
+    throw new Error("Implementation run produced no staged changes");
+  }
+
+  await runCommand("git", ["commit", "-m", `attractor: implementation run ${run.id}`], args.workDir);
+  await runCommand("git", ["push", "origin", run.targetBranch, "--force-with-lease"], args.workDir);
+  const pushedHeadSha = (await runCommand("git", ["rev-parse", "HEAD"], args.workDir)).trim();
+
+  const artifactPath = `runs/${run.projectId}/${run.id}/implementation-note.md`;
+  await putObject(artifactPath, implementationText, "text/markdown");
+  await prisma.artifact.create({
+    data: {
+      runId: run.id,
+      key: "implementation-note.md",
+      path: artifactPath,
+      contentType: "text/markdown",
+      sizeBytes: Buffer.byteLength(implementationText, "utf8")
+    }
+  });
+
+  const prTitle = run.githubIssue
+    ? `[#${run.githubIssue.issueNumber}] ${run.githubIssue.title}`
+    : `Attractor run ${run.id}`;
+  const prBody = [
+    `Automated implementation run ${run.id}.`,
+    run.githubIssue ? `Closes #${run.githubIssue.issueNumber}` : "",
+    "",
+    "## Implementation Summary",
+    implementationText.slice(0, 5000)
+  ]
+    .filter((item) => item.length > 0)
+    .join("\n");
+
+  if (!run.project.repoFullName) {
+    throw new Error(`Run ${run.id} has no repository configured`);
+  }
+
+  const prResult = await createPullRequest({
+    installationId: run.project.githubInstallationId ?? undefined,
+    repoFullName: run.project.repoFullName,
+    baseBranch: run.project.defaultBranch ?? run.sourceBranch,
+    headBranch: run.targetBranch,
+    title: prTitle,
+    body: prBody
+  });
+  const prUrl = prResult.url;
+
+  let githubPullRequestId: string | null = run.githubPullRequestId;
+  if (prResult.number) {
+    const linkedPr = await prisma.gitHubPullRequest.upsert({
+      where: {
+        projectId_prNumber: {
+          projectId: run.projectId,
+          prNumber: prResult.number
+        }
+      },
+      update: {
+        state: "open",
+        title: prTitle,
+        body: prBody,
+        url: prUrl ?? "",
+        headRefName: run.targetBranch,
+        headSha: prResult.headSha ?? pushedHeadSha,
+        baseRefName: run.project.defaultBranch ?? run.sourceBranch,
+        mergedAt: null,
+        updatedAt: new Date(),
+        syncedAt: new Date(),
+        ...(run.githubIssueId ? { linkedIssueId: run.githubIssueId } : {})
+      },
+      create: {
+        projectId: run.projectId,
+        prNumber: prResult.number,
+        state: "open",
+        title: prTitle,
+        body: prBody,
+        url: prUrl ?? "",
+        headRefName: run.targetBranch,
+        headSha: prResult.headSha ?? pushedHeadSha,
+        baseRefName: run.project.defaultBranch ?? run.sourceBranch,
+        mergedAt: null,
+        openedAt: new Date(),
+        closedAt: null,
+        updatedAt: new Date(),
+        syncedAt: new Date(),
+        ...(run.githubIssueId ? { linkedIssueId: run.githubIssueId } : {})
+      }
+    });
+    githubPullRequestId = linkedPr.id;
+  }
+
+  return {
+    prUrl,
+    prNumber: prResult.number,
+    githubPullRequestId
+  };
+}
+
 async function processTaskRun(args: {
   runId: string;
   projectId: string;
@@ -1326,6 +1646,238 @@ async function processTaskRun(args: {
   };
 }
 
+async function processImplementationDotRun(args: {
+  run: ImplementationRunRecord;
+  workDir: string;
+  attractorContent: string;
+  modelConfig: RunModelConfig;
+  checkpoint: { currentNodeId: string; contextJson: unknown } | null;
+}): Promise<{
+  prUrl: string | null;
+  prNumber: number | null;
+  githubPullRequestId: string | null;
+  exitNodeId: string;
+  finalNodeId: string | null;
+  patchNodeId: string | null;
+  summaryNodeId: string | null;
+}> {
+  const parsed = parseDotGraph(args.attractorContent);
+  if (!isDotImplementationGraph(parsed)) {
+    throw new Error("Attractor does not enable DOT implementation mode");
+  }
+
+  const stylesheetConfig = parsed.graphAttrs.model_stylesheet ?? parsed.graphAttrs.modelStylesheet;
+  if (stylesheetConfig && stylesheetConfig.trim().length > 0) {
+    const trimmed = stylesheetConfig.trim();
+    const source = trimmed.includes("{")
+      ? trimmed
+      : readFileSync(join(args.workDir, trimmed), "utf8");
+    const rules = parseModelStylesheet(source);
+    parsed.graphAttrs.model_stylesheet = source;
+    await appendRunEvent(args.run.id, "ModelStylesheetLoaded", {
+      runId: args.run.id,
+      ruleCount: rules.length
+    });
+  }
+
+  const graph = applyGraphTransforms(parsed);
+  validateDotGraph(graph);
+
+  const snapshot = buildRepositorySnapshot(args.workDir);
+  await appendRunEvent(args.run.id, "ImplementationRepositorySnapshotPrepared", {
+    runId: args.run.id,
+    filesIncluded: snapshot.filesIncluded,
+    truncated: snapshot.truncated
+  });
+
+  const restoredState = normalizeEngineState(args.checkpoint?.contextJson);
+  const initialState: EngineState =
+    restoredState ?? {
+      context: {},
+      nodeOutputs: {},
+      parallelOutputs: {},
+      nodeOutcomes: {},
+      nodeRetryCounts: {},
+      completedNodes: []
+    };
+
+  initialState.context = {
+    ...initialState.context,
+    runId: args.run.id,
+    repository: args.run.project.repoFullName,
+    sourceBranch: args.run.sourceBranch,
+    targetBranch: args.run.targetBranch,
+    repositoryTree: snapshot.tree,
+    repositorySnapshot: snapshot.content
+  };
+
+  const modelResolutions = new Map<
+    string,
+    {
+      nodeId: string;
+      requested: RunModelConfig;
+      resolved: RunModelConfig;
+      fallback?: { fromModelId: string; toModelId: string; reason: string };
+    }
+  >();
+
+  const maxSteps = parseOptionalInt(graph.graphAttrs.max_steps ?? graph.graphAttrs.maxSteps) ?? 1000;
+  const execution = await executeGraph({
+    graph,
+    initialState,
+    ...(args.checkpoint?.currentNodeId ? { startNodeId: args.checkpoint.currentNodeId } : {}),
+    maxSteps,
+    callbacks: {
+      codergen: async ({ node, prompt }) => {
+        await assertRunNotCanceled(args.run.id);
+        const requested = nodeModelConfig(args.modelConfig, node);
+        const result = await runCodergen(prompt, args.run.id, requested, `Node.${node.id}.`);
+        modelResolutions.set(node.id, {
+          nodeId: node.id,
+          requested,
+          resolved: result.modelConfig,
+          ...(result.fallback ? { fallback: result.fallback } : {})
+        });
+        if (result.fallback) {
+          await appendRunEvent(args.run.id, "ModelFallbackApplied", {
+            runId: args.run.id,
+            nodeId: node.id,
+            provider: result.modelConfig.provider,
+            fromModelId: result.fallback.fromModelId,
+            toModelId: result.fallback.toModelId,
+            reason: result.fallback.reason
+          });
+        }
+        return result.text;
+      },
+      tool: async ({ node }) => {
+        await appendRunEvent(args.run.id, "ImplementationToolNodeExecuted", {
+          runId: args.run.id,
+          nodeId: node.id,
+          tool: node.attrs.tool ?? null
+        });
+        return node.attrs.output ?? `Tool node ${node.id} executed`;
+      },
+      waitForHuman: async (question) =>
+        waitForHumanQuestion({
+          runId: args.run.id,
+          nodeId: question.nodeId,
+          prompt: question.prompt,
+          options: question.options,
+          timeoutMs: question.timeoutMs
+        }),
+      onEvent: async (event) => {
+        await appendRunEvent(args.run.id, `Engine${event.type}`, {
+          runId: args.run.id,
+          ...(event.nodeId ? { nodeId: event.nodeId } : {}),
+          ...(event.payload !== undefined ? { payload: event.payload } : {})
+        });
+      },
+      saveCheckpoint: async (nodeId, state) => {
+        await prisma.runCheckpoint.upsert({
+          where: { runId: args.run.id },
+          update: {
+            currentNodeId: nodeId,
+            contextJson: state as never
+          },
+          create: {
+            runId: args.run.id,
+            currentNodeId: nodeId,
+            contextJson: state as never
+          }
+        });
+      },
+      saveOutcome: async (nodeId, status, payload, attempt) => {
+        await prisma.runNodeOutcome.create({
+          data: {
+            runId: args.run.id,
+            nodeId,
+            status,
+            attempt,
+            payload: payload as never
+          }
+        });
+      }
+    }
+  });
+
+  const finalNodeId = selectFinalOutputNodeId(graph, execution.state);
+  const patchNodeId = selectImplementationPatchNodeId(graph, execution.state);
+  const summaryNodeId = selectImplementationSummaryNodeId(graph, execution.state, patchNodeId);
+
+  const patchOutput = patchNodeId ? resolveTaskNodeOutput(graph, execution.state, patchNodeId) : "";
+  const summaryOutput = summaryNodeId ? resolveTaskNodeOutput(graph, execution.state, summaryNodeId) : "";
+
+  let implementationText = summaryOutput.trim().length > 0 ? summaryOutput.trim() : patchOutput.trim();
+  if (implementationText.length === 0 && finalNodeId) {
+    implementationText = resolveTaskNodeOutput(graph, execution.state, finalNodeId).trim();
+  }
+  if (patchOutput.trim().length > 0 && !extractUnifiedDiff(implementationText)) {
+    implementationText = [implementationText, patchOutput.trim()].filter(Boolean).join("\n\n");
+  }
+  implementationText = implementationText.length > 0 ? `${implementationText}\n` : "";
+  if (!implementationText) {
+    throw new Error("DOT implementation run produced no implementation output");
+  }
+
+  const reviewerArtifactNodes = parseArtifactNodeList(
+    graph.graphAttrs.reviewer_artifact_nodes ??
+      graph.graphAttrs.reviewerArtifactNodes ??
+      graph.graphAttrs.additional_artifact_nodes ??
+      graph.graphAttrs.additionalArtifactNodes
+  );
+  const reviewerArtifacts: SupplementalArtifact[] = [];
+  const usedKeys = new Set<string>(["implementation.patch", "implementation-note.md"]);
+  for (const nodeId of reviewerArtifactNodes) {
+    const nodeOutput = resolveTaskNodeOutput(graph, execution.state, nodeId);
+    const body =
+      nodeOutput && nodeOutput.trim().length > 0
+        ? nodeOutput.trim()
+        : [
+            "# Reviewer Output Unavailable",
+            "",
+            `Node: \`${nodeId}\``,
+            `Status: \`${execution.state.nodeOutcomes[nodeId]?.status ?? "UNKNOWN"}\``,
+            "",
+            execution.state.nodeOutcomes[nodeId]?.failureReason ??
+              "The reviewer node did not produce markdown output."
+          ].join("\n");
+    const desiredKey = reviewerArtifactKey(nodeId);
+    const key = withUniqueArtifactKey(normalizeArtifactKey(desiredKey, desiredKey), usedKeys);
+    reviewerArtifacts.push({
+      key,
+      content: `${body}\n`,
+      nodeId
+    });
+  }
+
+  const applyResult = await applyImplementationResult({
+    run: args.run,
+    workDir: args.workDir,
+    implementationText,
+    supplementalArtifacts: reviewerArtifacts
+  });
+
+  await appendRunEvent(args.run.id, "ImplementationDotCompleted", {
+    runId: args.run.id,
+    exitNodeId: execution.exitNodeId,
+    finalNodeId,
+    patchNodeId,
+    summaryNodeId,
+    modelResolutions: [...modelResolutions.values()]
+  });
+
+  return {
+    prUrl: applyResult.prUrl,
+    prNumber: applyResult.prNumber,
+    githubPullRequestId: applyResult.githubPullRequestId,
+    exitNodeId: execution.exitNodeId,
+    finalNodeId,
+    patchNodeId,
+    summaryNodeId
+  };
+}
+
 async function processRun(spec: RunExecutionSpec): Promise<void> {
   const environment = parseEnvironmentSpec(spec);
   const run = await prisma.run.findUnique({
@@ -1476,7 +2028,68 @@ async function processRun(spec: RunExecutionSpec): Promise<void> {
     }
 
     if (!run.specBundleId || !run.referencedSpecBundle) {
-      throw new Error("Implementation run requires specBundleId");
+      if (isDotImplementationAttractor(attractorContent)) {
+        const implementationDotResult = await processImplementationDotRun({
+          run: {
+            id: run.id,
+            projectId: run.projectId,
+            sourceBranch: run.sourceBranch,
+            targetBranch: run.targetBranch,
+            githubIssueId: run.githubIssueId,
+            githubPullRequestId: run.githubPullRequestId,
+            project: {
+              repoFullName: run.project.repoFullName,
+              defaultBranch: run.project.defaultBranch,
+              githubInstallationId: run.project.githubInstallationId
+            },
+            githubIssue: run.githubIssue
+              ? {
+                  issueNumber: run.githubIssue.issueNumber,
+                  title: run.githubIssue.title,
+                  url: run.githubIssue.url,
+                  body: run.githubIssue.body
+                }
+              : null
+          },
+          workDir,
+          attractorContent,
+          modelConfig: spec.modelConfig,
+          checkpoint: run.checkpoint
+            ? {
+                currentNodeId: run.checkpoint.currentNodeId,
+                contextJson: run.checkpoint.contextJson
+              }
+            : null
+        });
+
+        await prisma.run.update({
+          where: { id: run.id },
+          data: {
+            status: RunStatus.SUCCEEDED,
+            finishedAt: new Date(),
+            prUrl: implementationDotResult.prUrl,
+            githubPullRequestId: implementationDotResult.githubPullRequestId
+          }
+        });
+
+        await appendRunEvent(run.id, "RunCompleted", {
+          runId: run.id,
+          status: "SUCCEEDED",
+          prUrl: implementationDotResult.prUrl,
+          prNumber: implementationDotResult.prNumber,
+          dotExecution: {
+            exitNodeId: implementationDotResult.exitNodeId,
+            finalNodeId: implementationDotResult.finalNodeId,
+            patchNodeId: implementationDotResult.patchNodeId,
+            summaryNodeId: implementationDotResult.summaryNodeId
+          }
+        });
+        return;
+      }
+
+      throw new Error(
+        "Implementation run requires specBundleId unless attractor enables DOT implementation mode"
+      );
     }
 
     if (run.referencedSpecBundle.schemaVersion !== "v1") {
@@ -1527,158 +2140,47 @@ async function processRun(spec: RunExecutionSpec): Promise<void> {
     }
     const implementationText = implementationResult.text;
 
-    await runCommand("git", ["checkout", "-B", run.targetBranch], workDir);
-
-    const outputDir = join(workDir, ".attractor");
-    mkdirSync(outputDir, { recursive: true });
-    const outputFile = join(outputDir, `implementation-${run.id}.md`);
-    writeFileSync(outputFile, implementationText, "utf8");
-
-    await runCommand("git", ["add", outputFile], workDir);
-
-    const extractedDiff = extractUnifiedDiff(implementationText);
-    if (extractedDiff) {
-      await appendRunEvent(run.id, "ImplementationPatchExtracted", {
-        runId: run.id,
-        bytes: Buffer.byteLength(extractedDiff, "utf8")
-      });
-      const patchFile = join(outputDir, `implementation-${run.id}.patch`);
-      writeFileSync(patchFile, extractedDiff, "utf8");
-
-      try {
-        await runCommand("git", ["apply", "--index", patchFile], workDir);
-      } catch (error) {
-        await appendRunEvent(run.id, "ImplementationPatchApplyFailed", {
-          runId: run.id,
-          message: error instanceof Error ? error.message : String(error)
-        });
-        throw error;
-      }
-
-      const patchArtifactPath = `runs/${run.projectId}/${run.id}/implementation.patch`;
-      await putObject(patchArtifactPath, extractedDiff, "text/x-diff");
-      await prisma.artifact.create({
-        data: {
-          runId: run.id,
-          key: "implementation.patch",
-          path: patchArtifactPath,
-          contentType: "text/x-diff",
-          sizeBytes: Buffer.byteLength(extractedDiff, "utf8")
-        }
-      });
-
-      await appendRunEvent(run.id, "ImplementationPatchApplied", {
-        runId: run.id,
-        patchArtifactPath
-      });
-    } else {
-      await appendRunEvent(run.id, "ImplementationPatchMissing", {
-        runId: run.id
-      });
-    }
-
-    if (!(await hasStagedChanges(workDir))) {
-      throw new Error("Implementation run produced no staged changes");
-    }
-
-    await runCommand("git", ["commit", "-m", `attractor: implementation run ${run.id}`], workDir);
-    await runCommand("git", ["push", "origin", run.targetBranch, "--force-with-lease"], workDir);
-    const pushedHeadSha = (await runCommand("git", ["rev-parse", "HEAD"], workDir)).trim();
-
-    let prUrl: string | null = null;
-    const artifactPath = `runs/${run.projectId}/${run.id}/implementation-note.md`;
-    await putObject(artifactPath, implementationText, "text/markdown");
-    await prisma.artifact.create({
-      data: {
-        runId: run.id,
-        key: "implementation-note.md",
-        path: artifactPath,
-        contentType: "text/markdown",
-        sizeBytes: Buffer.byteLength(implementationText, "utf8")
-      }
-    });
-
-    const prTitle = run.githubIssue
-      ? `[#${run.githubIssue.issueNumber}] ${run.githubIssue.title}`
-      : `Attractor run ${run.id}`;
-    const prBody = [
-      `Automated implementation run ${run.id}.`,
-      run.githubIssue ? `Closes #${run.githubIssue.issueNumber}` : "",
-      "",
-      "## Implementation Summary",
-      implementationText.slice(0, 5000)
-    ]
-      .filter((item) => item.length > 0)
-      .join("\n");
-
-    const prResult = await createPullRequest({
-      installationId: run.project.githubInstallationId ?? undefined,
-      repoFullName: run.project.repoFullName,
-      baseBranch: run.project.defaultBranch ?? run.sourceBranch,
-      headBranch: run.targetBranch,
-      title: prTitle,
-      body: prBody
-    });
-    prUrl = prResult.url;
-
-    let githubPullRequestId: string | null = run.githubPullRequestId;
-    if (prResult.number) {
-      const linkedPr = await prisma.gitHubPullRequest.upsert({
-        where: {
-          projectId_prNumber: {
-            projectId: run.projectId,
-            prNumber: prResult.number
-          }
+    const implementationApplyResult = await applyImplementationResult({
+      run: {
+        id: run.id,
+        projectId: run.projectId,
+        sourceBranch: run.sourceBranch,
+        targetBranch: run.targetBranch,
+        githubIssueId: run.githubIssueId,
+        githubPullRequestId: run.githubPullRequestId,
+        project: {
+          repoFullName: run.project.repoFullName,
+          defaultBranch: run.project.defaultBranch,
+          githubInstallationId: run.project.githubInstallationId
         },
-        update: {
-          state: "open",
-          title: prTitle,
-          body: prBody,
-          url: prUrl ?? "",
-          headRefName: run.targetBranch,
-          headSha: prResult.headSha ?? pushedHeadSha,
-          baseRefName: run.project.defaultBranch ?? run.sourceBranch,
-          mergedAt: null,
-          updatedAt: new Date(),
-          syncedAt: new Date(),
-          ...(run.githubIssueId ? { linkedIssueId: run.githubIssueId } : {})
-        },
-        create: {
-          projectId: run.projectId,
-          prNumber: prResult.number,
-          state: "open",
-          title: prTitle,
-          body: prBody,
-          url: prUrl ?? "",
-          headRefName: run.targetBranch,
-          headSha: prResult.headSha ?? pushedHeadSha,
-          baseRefName: run.project.defaultBranch ?? run.sourceBranch,
-          mergedAt: null,
-          openedAt: new Date(),
-          closedAt: null,
-          updatedAt: new Date(),
-          syncedAt: new Date(),
-          ...(run.githubIssueId ? { linkedIssueId: run.githubIssueId } : {})
-        }
-      });
-      githubPullRequestId = linkedPr.id;
-    }
+        githubIssue: run.githubIssue
+          ? {
+              issueNumber: run.githubIssue.issueNumber,
+              title: run.githubIssue.title,
+              url: run.githubIssue.url,
+              body: run.githubIssue.body
+            }
+          : null
+      },
+      workDir,
+      implementationText
+    });
 
     await prisma.run.update({
       where: { id: run.id },
       data: {
         status: RunStatus.SUCCEEDED,
         finishedAt: new Date(),
-        prUrl,
-        githubPullRequestId
+        prUrl: implementationApplyResult.prUrl,
+        githubPullRequestId: implementationApplyResult.githubPullRequestId
       }
     });
 
     await appendRunEvent(run.id, "RunCompleted", {
       runId: run.id,
       status: "SUCCEEDED",
-      prUrl,
-      prNumber: prResult.number
+      prUrl: implementationApplyResult.prUrl,
+      prNumber: implementationApplyResult.prNumber
     });
   } finally {
     rmSync(workDir, { recursive: true, force: true });
