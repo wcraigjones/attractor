@@ -6,11 +6,16 @@ export interface AttractorViewRow {
   id: string;
   source: "project" | "global";
   name: string;
-  repoPath: string;
+  location: string;
+  contentVersion: number;
   defaultRunType: AttractorDef["defaultRunType"];
   active: boolean;
   status: AttractorRowStatus;
   muted: boolean;
+}
+
+function displayLocation(attractor: AttractorDef): string {
+  return attractor.contentPath ?? attractor.repoPath ?? "-";
 }
 
 function isProjectAttractor(attractor: AttractorDef): boolean {
@@ -41,7 +46,8 @@ export function buildProjectAttractorsViewRows(attractors: AttractorDef[]): Attr
       id: `project:${attractor.id}`,
       source: "project",
       name: attractor.name,
-      repoPath: attractor.repoPath,
+      location: displayLocation(attractor),
+      contentVersion: attractor.contentVersion,
       defaultRunType: attractor.defaultRunType,
       active: attractor.active,
       status: "Project",
@@ -56,7 +62,8 @@ export function buildProjectAttractorsViewRows(attractors: AttractorDef[]): Attr
         id: `global:${attractor.id}`,
         source: "global" as const,
         name: attractor.name,
-        repoPath: attractor.repoPath,
+        location: displayLocation(attractor),
+        contentVersion: attractor.contentVersion,
         defaultRunType: attractor.defaultRunType,
         active: attractor.active,
         status: overridden ? "Overridden" : "Inherited",

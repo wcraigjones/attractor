@@ -15,6 +15,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { Textarea } from "../components/ui/textarea";
 
+const DEFAULT_DOT_TEMPLATE = `digraph attractor {
+  start [shape=Mdiamond, type="start", label="Start"];
+  done [shape=Msquare, type="exit", label="Done"];
+  start -> done;
+}`;
+
 function statusVariant(status: AttractorRowStatus): "default" | "secondary" | "success" | "warning" {
   if (status === "Project") {
     return "default";
@@ -31,7 +37,8 @@ export function ProjectAttractorsPage() {
   const queryClient = useQueryClient();
 
   const [name, setName] = useState("");
-  const [repoPath, setRepoPath] = useState("factory/self-bootstrap.dot");
+  const [sourceLabel, setSourceLabel] = useState("");
+  const [content, setContent] = useState(DEFAULT_DOT_TEMPLATE);
   const [defaultRunType, setDefaultRunType] = useState<"planning" | "implementation" | "task">("planning");
   const [description, setDescription] = useState("");
 
@@ -46,7 +53,8 @@ export function ProjectAttractorsPage() {
     mutationFn: () =>
       createAttractor(projectId, {
         name: name.trim(),
-        repoPath: repoPath.trim(),
+        content,
+        ...(sourceLabel.trim().length > 0 ? { repoPath: sourceLabel.trim() } : {}),
         defaultRunType,
         description: description.trim().length > 0 ? description.trim() : undefined,
         active: true
@@ -83,7 +91,8 @@ export function ProjectAttractorsPage() {
                 <TableRow>
                   <TableHead>Source</TableHead>
                   <TableHead>Name</TableHead>
-                  <TableHead>Path</TableHead>
+                  <TableHead>Storage Path</TableHead>
+                  <TableHead>Version</TableHead>
                   <TableHead>Default Run</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Activity</TableHead>
@@ -101,7 +110,8 @@ export function ProjectAttractorsPage() {
                       </Badge>
                     </TableCell>
                     <TableCell>{attractor.name}</TableCell>
-                    <TableCell className="mono text-xs">{attractor.repoPath}</TableCell>
+                    <TableCell className="mono text-xs">{attractor.location}</TableCell>
+                    <TableCell>{attractor.contentVersion > 0 ? attractor.contentVersion : "-"}</TableCell>
                     <TableCell>{attractor.defaultRunType}</TableCell>
                     <TableCell>
                       <Badge variant={statusVariant(attractor.status)}>{attractor.status}</Badge>
@@ -131,8 +141,8 @@ export function ProjectAttractorsPage() {
               className="space-y-3"
               onSubmit={(event) => {
                 event.preventDefault();
-                if (!name.trim() || !repoPath.trim()) {
-                  toast.error("Name and repository path are required");
+                if (!name.trim() || !content.trim()) {
+                  toast.error("Name and DOT content are required");
                   return;
                 }
                 createMutation.mutate();
@@ -143,8 +153,20 @@ export function ProjectAttractorsPage() {
                 <Input value={name} onChange={(event) => setName(event.target.value)} />
               </div>
               <div className="space-y-1">
-                <Label>Repo Path</Label>
-                <Input value={repoPath} onChange={(event) => setRepoPath(event.target.value)} />
+                <Label>Source Label (optional)</Label>
+                <Input
+                  value={sourceLabel}
+                  onChange={(event) => setSourceLabel(event.target.value)}
+                  placeholder="factory/self-bootstrap.dot"
+                />
+              </div>
+              <div className="space-y-1">
+                <Label>DOT Content</Label>
+                <Textarea
+                  value={content}
+                  onChange={(event) => setContent(event.target.value)}
+                  className="min-h-[220px] font-mono text-xs"
+                />
               </div>
               <div className="space-y-1">
                 <Label>Default Run Type</Label>

@@ -78,12 +78,15 @@ model GlobalSecret {
 model GlobalAttractor {
   id             String   @id @default(cuid())
   name           String   @unique
-  repoPath       String
+  repoPath       String?
+  contentPath    String?
+  contentVersion Int      @default(0)
   defaultRunType RunType
   description    String?
   active         Boolean  @default(true)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
+  versions       GlobalAttractorVersion[]
 }
 
 model ProjectSecret {
@@ -105,7 +108,9 @@ model AttractorDef {
   projectId      String
   scope          AttractorScope @default(PROJECT)
   name           String
-  repoPath       String
+  repoPath       String?
+  contentPath    String?
+  contentVersion Int      @default(0)
   defaultRunType RunType
   description    String?
   active         Boolean  @default(true)
@@ -113,8 +118,37 @@ model AttractorDef {
   updatedAt      DateTime @updatedAt
   project        Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
   runs           Run[]
+  versions       AttractorDefVersion[]
 
   @@unique([projectId, name, scope])
+}
+
+model GlobalAttractorVersion {
+  id               String         @id @default(cuid())
+  globalAttractorId String
+  version          Int
+  contentPath      String
+  contentSha256    String
+  sizeBytes        Int
+  createdAt        DateTime       @default(now())
+  globalAttractor  GlobalAttractor @relation(fields: [globalAttractorId], references: [id], onDelete: Cascade)
+
+  @@unique([globalAttractorId, version])
+  @@index([globalAttractorId, createdAt])
+}
+
+model AttractorDefVersion {
+  id             String      @id @default(cuid())
+  attractorDefId String
+  version        Int
+  contentPath    String
+  contentSha256  String
+  sizeBytes      Int
+  createdAt      DateTime    @default(now())
+  attractorDef   AttractorDef @relation(fields: [attractorDefId], references: [id], onDelete: Cascade)
+
+  @@unique([attractorDefId, version])
+  @@index([attractorDefId, createdAt])
 }
 
 model Run {

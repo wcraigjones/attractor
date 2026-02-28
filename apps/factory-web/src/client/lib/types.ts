@@ -74,7 +74,9 @@ export interface AttractorDef {
   projectId: string;
   scope: AttractorScope;
   name: string;
-  repoPath: string;
+  repoPath: string | null;
+  contentPath: string | null;
+  contentVersion: number;
   defaultRunType: RunType;
   description: string | null;
   active: boolean;
@@ -85,7 +87,9 @@ export interface AttractorDef {
 export interface GlobalAttractor {
   id: string;
   name: string;
-  repoPath: string;
+  repoPath: string | null;
+  contentPath: string | null;
+  contentVersion: number;
   defaultRunType: RunType;
   description: string | null;
   active: boolean;

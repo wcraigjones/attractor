@@ -12,13 +12,26 @@ TARGET_BRANCH="${TARGET_BRANCH:-attractor/self-factory}"
 SET_PROVIDER_SECRET="${SET_PROVIDER_SECRET:-false}"
 SECRET_NAME="${SECRET_NAME:-llm-${MODEL_PROVIDER}}"
 
-bootstrap_payload=$(cat <<JSON
-{
-  "repoFullName": "$REPO_FULL_NAME",
-  "defaultBranch": "$DEFAULT_BRANCH",
-  "attractorPath": "$ATTRACTOR_PATH"
-}
-JSON
+if [[ ! -f "$ATTRACTOR_PATH" ]]; then
+  echo "Attractor file not found: $ATTRACTOR_PATH" >&2
+  exit 1
+fi
+ATTRACTOR_CONTENT="$(cat "$ATTRACTOR_PATH")"
+
+bootstrap_payload=$(
+  REPO_FULL_NAME="$REPO_FULL_NAME" \
+  DEFAULT_BRANCH="$DEFAULT_BRANCH" \
+  ATTRACTOR_PATH="$ATTRACTOR_PATH" \
+  ATTRACTOR_CONTENT="$ATTRACTOR_CONTENT" \
+  node -e '
+    const payload = {
+      repoFullName: process.env.REPO_FULL_NAME,
+      defaultBranch: process.env.DEFAULT_BRANCH,
+      attractorPath: process.env.ATTRACTOR_PATH,
+      attractorContent: process.env.ATTRACTOR_CONTENT
+    };
+    process.stdout.write(JSON.stringify(payload));
+  '
 )
 
 bootstrap_response=$(curl -sS -X POST "$API_BASE_URL/api/bootstrap/self" \

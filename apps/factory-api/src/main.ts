@@ -1,4 +1,7 @@
 import express from "express";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { Readable } from "node:stream";
 import { KubeConfig, CoreV1Api } from "@kubernetes/client-node";
 import { App as GitHubApp } from "@octokit/app";
@@ -13,7 +16,14 @@ import {
 } from "@prisma/client";
 import { Redis } from "ioredis";
 import { getModels, getProviders } from "@mariozechner/pi-ai";
-import { GetObjectCommand, HeadObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import {
+  CreateBucketCommand,
+  GetObjectCommand,
+  HeadBucketCommand,
+  HeadObjectCommand,
+  PutObjectCommand,
+  S3Client
+} from "@aws-sdk/client-s3";
 import { z } from "zod";
 import {
   type EnvironmentResources,
@@ -155,6 +165,65 @@ async function getObjectText(key: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+let attractorBucketReady = false;
+
+async function ensureAttractorBucket(): Promise<void> {
+  if (attractorBucketReady) {
+    return;
+  }
+
+  try {
+    await minioClient.send(new HeadBucketCommand({ Bucket: MINIO_BUCKET }));
+    attractorBucketReady = true;
+    return;
+  } catch (error) {
+    const status = (error as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode;
+    const name = (error as { name?: string })?.name;
+    if (status === 404 || name === "NotFound" || name === "NoSuchBucket") {
+      await minioClient.send(new CreateBucketCommand({ Bucket: MINIO_BUCKET }));
+      attractorBucketReady = true;
+      return;
+    }
+    throw error;
+  }
+}
+
+function sanitizeAttractorName(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "") || "attractor";
+}
+
+function digestText(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function attractorObjectPath(args: {
+  scope: "global" | "project";
+  name: string;
+  version: number;
+  projectId?: string;
+}): string {
+  const safeName = sanitizeAttractorName(args.name);
+  if (args.scope === "global") {
+    return `attractors/global/${safeName}/v${args.version}.dot`;
+  }
+  if (!args.projectId) {
+    throw new Error("projectId is required for project attractor object paths");
+  }
+  return `attractors/projects/${args.projectId}/${safeName}/v${args.version}.dot`;
+}
+
+async function putAttractorContent(objectPath: string, content: string): Promise<void> {
+  await ensureAttractorBucket();
+  await minioClient.send(
+    new PutObjectCommand({
+      Bucket: MINIO_BUCKET,
+      Key: objectPath,
+      Body: content,
+      ContentType: "text/vnd.graphviz"
+    })
+  );
 }
 
 function toNullableText(value: string | undefined): string | null {
@@ -432,7 +501,9 @@ async function upsertGlobalAttractorForProject(
   projectId: string,
   attractor: {
     name: string;
-    repoPath: string;
+    repoPath: string | null;
+    contentPath: string | null;
+    contentVersion: number;
     defaultRunType: RunType;
     description: string | null;
     active: boolean;
@@ -448,6 +519,8 @@ async function upsertGlobalAttractorForProject(
     },
     update: {
       repoPath: attractor.repoPath,
+      contentPath: attractor.contentPath,
+      contentVersion: attractor.contentVersion,
       defaultRunType: attractor.defaultRunType,
       description: attractor.description,
       active: attractor.active
@@ -457,6 +530,8 @@ async function upsertGlobalAttractorForProject(
       scope: AttractorScope.GLOBAL,
       name: attractor.name,
       repoPath: attractor.repoPath,
+      contentPath: attractor.contentPath,
+      contentVersion: attractor.contentVersion,
       defaultRunType: attractor.defaultRunType,
       description: attractor.description,
       active: attractor.active
@@ -473,7 +548,9 @@ async function syncGlobalAttractorsToProject(projectId: string): Promise<void> {
 
 async function propagateGlobalAttractorToAllProjects(attractor: {
   name: string;
-  repoPath: string;
+  repoPath: string | null;
+  contentPath: string | null;
+  contentVersion: number;
   defaultRunType: RunType;
   description: string | null;
   active: boolean;
@@ -1212,7 +1289,8 @@ const bootstrapSelfSchema = z.object({
   defaultBranch: z.string().min(1).default("main"),
   installationId: z.string().min(1).optional(),
   attractorName: z.string().min(1).default("self-factory"),
-  attractorPath: z.string().min(1).default("factory/self-bootstrap.dot")
+  attractorPath: z.string().min(1).default("factory/self-bootstrap.dot"),
+  attractorContent: z.string().min(1).optional()
 });
 
 app.post("/api/bootstrap/self", async (req, res) => {
@@ -1270,6 +1348,63 @@ app.post("/api/bootstrap/self", async (req, res) => {
   await syncGlobalSecretsToNamespace(namespace);
   await syncGlobalAttractorsToProject(effectiveProject.id);
 
+  let bootstrapAttractorContent = toNullableText(input.data.attractorContent);
+  if (!bootstrapAttractorContent) {
+    const absolutePath = join(process.cwd(), input.data.attractorPath);
+    try {
+      bootstrapAttractorContent = readFileSync(absolutePath, "utf8");
+    } catch (error) {
+      return sendError(
+        res,
+        400,
+        `unable to load bootstrap attractor content from ${input.data.attractorPath}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  const existingBootstrapAttractor = await prisma.attractorDef.findUnique({
+    where: {
+      projectId_name_scope: {
+        projectId: effectiveProject.id,
+        name: input.data.attractorName,
+        scope: AttractorScope.PROJECT
+      }
+    }
+  });
+  const currentVersion = existingBootstrapAttractor?.contentVersion ?? 0;
+  const latestVersion =
+    existingBootstrapAttractor && currentVersion > 0
+      ? await prisma.attractorDefVersion.findUnique({
+          where: {
+            attractorDefId_version: {
+              attractorDefId: existingBootstrapAttractor.id,
+              version: currentVersion
+            }
+          }
+        })
+      : null;
+  const contentSha256 = digestText(bootstrapAttractorContent);
+  const needsNewVersion =
+    !existingBootstrapAttractor ||
+    !existingBootstrapAttractor.contentPath ||
+    currentVersion <= 0 ||
+    latestVersion?.contentSha256 !== contentSha256;
+
+  let contentPath = existingBootstrapAttractor?.contentPath ?? null;
+  let contentVersion = currentVersion;
+  if (needsNewVersion) {
+    contentVersion = Math.max(currentVersion, 0) + 1;
+    contentPath = attractorObjectPath({
+      scope: "project",
+      projectId: effectiveProject.id,
+      name: input.data.attractorName,
+      version: contentVersion
+    });
+    await putAttractorContent(contentPath, bootstrapAttractorContent);
+  }
+
   const attractor = await prisma.attractorDef.upsert({
     where: {
       projectId_name_scope: {
@@ -1280,6 +1415,8 @@ app.post("/api/bootstrap/self", async (req, res) => {
     },
     update: {
       repoPath: input.data.attractorPath,
+      contentPath,
+      contentVersion,
       defaultRunType: "planning",
       active: true,
       description: "Self-bootstrap attractor pipeline for this repository"
@@ -1289,11 +1426,25 @@ app.post("/api/bootstrap/self", async (req, res) => {
       scope: AttractorScope.PROJECT,
       name: input.data.attractorName,
       repoPath: input.data.attractorPath,
+      contentPath,
+      contentVersion,
       defaultRunType: "planning",
       active: true,
       description: "Self-bootstrap attractor pipeline for this repository"
     }
   });
+
+  if (needsNewVersion && contentPath) {
+    await prisma.attractorDefVersion.create({
+      data: {
+        attractorDefId: attractor.id,
+        version: contentVersion,
+        contentPath,
+        contentSha256,
+        sizeBytes: Buffer.byteLength(bootstrapAttractorContent, "utf8")
+      }
+    });
+  }
 
   res.status(201).json({ project: effectiveProject, attractor });
 });
@@ -1485,7 +1636,8 @@ app.get("/api/projects/:projectId/secrets", async (req, res) => {
 
 const createAttractorSchema = z.object({
   name: z.string().min(1),
-  repoPath: z.string().min(1),
+  content: z.string().min(1),
+  repoPath: z.string().optional(),
   defaultRunType: z.enum(["planning", "implementation", "task"]),
   description: z.string().optional(),
   active: z.boolean().optional()
@@ -1497,24 +1649,76 @@ app.post("/api/attractors/global", async (req, res) => {
     return sendError(res, 400, input.error.message);
   }
 
+  const content = input.data.content.trim();
+  if (content.length === 0) {
+    return sendError(res, 400, "attractor content must not be empty");
+  }
+
+  const existing = await prisma.globalAttractor.findUnique({
+    where: { name: input.data.name }
+  });
+  const currentVersion = existing?.contentVersion ?? 0;
+  const latestVersion =
+    existing && currentVersion > 0
+      ? await prisma.globalAttractorVersion.findUnique({
+          where: {
+            globalAttractorId_version: {
+              globalAttractorId: existing.id,
+              version: currentVersion
+            }
+          }
+        })
+      : null;
+  const contentSha256 = digestText(content);
+  const needsNewVersion =
+    !existing || !existing.contentPath || currentVersion <= 0 || latestVersion?.contentSha256 !== contentSha256;
+
+  let contentPath = existing?.contentPath ?? null;
+  let contentVersion = currentVersion;
+  if (needsNewVersion) {
+    contentVersion = Math.max(currentVersion, 0) + 1;
+    contentPath = attractorObjectPath({
+      scope: "global",
+      name: input.data.name,
+      version: contentVersion
+    });
+    await putAttractorContent(contentPath, content);
+  }
+
   const saved = await prisma.globalAttractor.upsert({
     where: {
       name: input.data.name
     },
     update: {
-      repoPath: input.data.repoPath,
+      repoPath: toNullableText(input.data.repoPath),
+      contentPath,
+      contentVersion,
       defaultRunType: input.data.defaultRunType,
       description: input.data.description,
       ...(input.data.active !== undefined ? { active: input.data.active } : {})
     },
     create: {
       name: input.data.name,
-      repoPath: input.data.repoPath,
+      repoPath: toNullableText(input.data.repoPath),
+      contentPath,
+      contentVersion,
       defaultRunType: input.data.defaultRunType,
       description: input.data.description,
       active: input.data.active ?? true
     }
   });
+
+  if (needsNewVersion && contentPath) {
+    await prisma.globalAttractorVersion.create({
+      data: {
+        globalAttractorId: saved.id,
+        version: contentVersion,
+        contentPath,
+        contentSha256,
+        sizeBytes: Buffer.byteLength(content, "utf8")
+      }
+    });
+  }
 
   await propagateGlobalAttractorToAllProjects(saved);
 
@@ -1534,19 +1738,91 @@ app.post("/api/projects/:projectId/attractors", async (req, res) => {
     return sendError(res, 400, input.error.message);
   }
 
-  const created = await prisma.attractorDef.create({
-    data: {
+  const content = input.data.content.trim();
+  if (content.length === 0) {
+    return sendError(res, 400, "attractor content must not be empty");
+  }
+
+  const existing = await prisma.attractorDef.findUnique({
+    where: {
+      projectId_name_scope: {
+        projectId: req.params.projectId,
+        name: input.data.name,
+        scope: AttractorScope.PROJECT
+      }
+    }
+  });
+  const currentVersion = existing?.contentVersion ?? 0;
+  const latestVersion =
+    existing && currentVersion > 0
+      ? await prisma.attractorDefVersion.findUnique({
+          where: {
+            attractorDefId_version: {
+              attractorDefId: existing.id,
+              version: currentVersion
+            }
+          }
+        })
+      : null;
+  const contentSha256 = digestText(content);
+  const needsNewVersion =
+    !existing || !existing.contentPath || currentVersion <= 0 || latestVersion?.contentSha256 !== contentSha256;
+
+  let contentPath = existing?.contentPath ?? null;
+  let contentVersion = currentVersion;
+  if (needsNewVersion) {
+    contentVersion = Math.max(currentVersion, 0) + 1;
+    contentPath = attractorObjectPath({
+      scope: "project",
+      projectId: req.params.projectId,
+      name: input.data.name,
+      version: contentVersion
+    });
+    await putAttractorContent(contentPath, content);
+  }
+
+  const saved = await prisma.attractorDef.upsert({
+    where: {
+      projectId_name_scope: {
+        projectId: req.params.projectId,
+        name: input.data.name,
+        scope: AttractorScope.PROJECT
+      }
+    },
+    update: {
+      repoPath: toNullableText(input.data.repoPath),
+      contentPath,
+      contentVersion,
+      defaultRunType: input.data.defaultRunType,
+      description: input.data.description,
+      ...(input.data.active !== undefined ? { active: input.data.active } : {})
+    },
+    create: {
       projectId: req.params.projectId,
       scope: AttractorScope.PROJECT,
       name: input.data.name,
-      repoPath: input.data.repoPath,
+      repoPath: toNullableText(input.data.repoPath),
+      contentPath,
+      contentVersion,
       defaultRunType: input.data.defaultRunType,
       description: input.data.description,
       active: input.data.active ?? true
     }
   });
 
-  res.status(201).json(created);
+  if (needsNewVersion && contentPath) {
+    await prisma.attractorDefVersion.create({
+      data: {
+        attractorDefId: saved.id,
+        version: contentVersion,
+        contentPath,
+        contentSha256,
+        sizeBytes: Buffer.byteLength(content, "utf8")
+      }
+    });
+  }
+
+  res.status(201).json(saved);
 });
 
 app.get("/api/projects/:projectId/attractors", async (req, res) => {

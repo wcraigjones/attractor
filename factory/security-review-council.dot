@@ -2,6 +2,7 @@ digraph security_review_council {
   graph [
     goal="Global multi-model security review council",
     final_artifact_key="security-review-report.md",
+    reviewer_artifact_nodes="reviewer_gpt53,reviewer_gemini,reviewer_sonnet,reviewer_opus,reviewer_glm,reviewer_kimi",
     final_output_node="synthesis"
   ]
 
