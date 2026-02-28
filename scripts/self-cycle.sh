@@ -30,7 +30,13 @@ bootstrap_payload=$(cat <<JSON
 {
   "repoFullName": "$REPO_FULL_NAME",
   "defaultBranch": "$DEFAULT_BRANCH",
-  "attractorPath": "$ATTRACTOR_PATH"
+  "attractorPath": "$ATTRACTOR_PATH",
+  "modelConfig": {
+    "provider": "$MODEL_PROVIDER",
+    "modelId": "$MODEL_ID",
+    "reasoningLevel": "$REASONING_LEVEL",
+    "temperature": 0.2
+  }
 }
 JSON
 )
@@ -60,13 +66,7 @@ planning_payload=$(cat <<JSON
   "attractorDefId": "$attractor_id",
   "runType": "planning",
   "sourceBranch": "$DEFAULT_BRANCH",
-  "targetBranch": "$PLANNING_TARGET_BRANCH",
-  "modelConfig": {
-    "provider": "$MODEL_PROVIDER",
-    "modelId": "$MODEL_ID",
-    "reasoningLevel": "$REASONING_LEVEL",
-    "temperature": 0.2
-  }
+  "targetBranch": "$PLANNING_TARGET_BRANCH"
 }
 JSON
 )
@@ -100,13 +100,7 @@ implementation_payload=$(cat <<JSON
 {
   "attractorDefId": "$attractor_id",
   "sourceBranch": "$DEFAULT_BRANCH",
-  "targetBranch": "$IMPLEMENTATION_TARGET_BRANCH",
-  "modelConfig": {
-    "provider": "$MODEL_PROVIDER",
-    "modelId": "$MODEL_ID",
-    "reasoningLevel": "$REASONING_LEVEL",
-    "temperature": 0.2
-  }
+  "targetBranch": "$IMPLEMENTATION_TARGET_BRANCH"
 }
 JSON
 )

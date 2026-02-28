@@ -7,10 +7,8 @@ import {
   createRun,
   listAttractors,
   listEnvironments,
-  listModels,
   listProjects,
-  listProjectRuns,
-  listProviders
+  listProjectRuns
 } from "../lib/api";
 import { buildEffectiveAttractors } from "../lib/attractors-view";
 import { getInactiveDefaultEnvironment, listActiveEnvironments } from "../lib/environments-view";
@@ -35,14 +33,9 @@ export function ProjectRunsPage() {
 
   const [runType, setRunType] = useState<RunType>("planning");
   const [attractorDefId, setAttractorDefId] = useState("");
-  const [provider, setProvider] = useState("openai");
-  const [modelId, setModelId] = useState("");
-  const [reasoningLevel, setReasoningLevel] = useState("high");
   const [sourceBranch, setSourceBranch] = useState("main");
   const [targetBranch, setTargetBranch] = useState("attractor/new-run");
   const [specBundleId, setSpecBundleId] = useState("");
-  const [temperature, setTemperature] = useState("0.2");
-  const [maxTokens, setMaxTokens] = useState("");
   const [environmentSelection, setEnvironmentSelection] = useState(PROJECT_DEFAULT_ENVIRONMENT);
 
   const runsQuery = useQuery({
@@ -55,20 +48,18 @@ export function ProjectRunsPage() {
     queryFn: () => listAttractors(projectId),
     enabled: projectId.length > 0
   });
-  const providersQuery = useQuery({ queryKey: ["providers"], queryFn: listProviders });
   const projectsQuery = useQuery({ queryKey: ["projects"], queryFn: listProjects });
   const environmentsQuery = useQuery({
     queryKey: ["environments"],
     queryFn: listEnvironments
   });
-  const modelsQuery = useQuery({
-    queryKey: ["models", provider],
-    queryFn: () => listModels(provider),
-    enabled: provider.length > 0
-  });
   const effectiveAttractors = useMemo(
     () => buildEffectiveAttractors(attractorsQuery.data ?? []),
     [attractorsQuery.data]
+  );
+  const selectedAttractor = useMemo(
+    () => effectiveAttractors.find((item) => item.id === attractorDefId) ?? null,
+    [attractorDefId, effectiveAttractors]
   );
   const project = useMemo(
     () => (projectsQuery.data ?? []).find((candidate) => candidate.id === projectId),
@@ -129,8 +120,8 @@ export function ProjectRunsPage() {
       if (!attractorDefId) {
         throw new Error("Attractor definition is required");
       }
-      if (!modelId) {
-        throw new Error("Model ID is required");
+      if (!selectedAttractor?.modelConfig?.provider || !selectedAttractor?.modelConfig?.modelId) {
+        throw new Error("Selected attractor is missing model configuration");
       }
 
       return createRun({
@@ -144,14 +135,7 @@ export function ProjectRunsPage() {
         targetBranch: runType === "task" ? sourceBranch : targetBranch,
         ...(runType === "implementation" && specBundleId.trim().length > 0
           ? { specBundleId: specBundleId.trim() }
-          : {}),
-        modelConfig: {
-          provider,
-          modelId,
-          reasoningLevel: reasoningLevel as "minimal" | "low" | "medium" | "high" | "xhigh",
-          temperature: Number.parseFloat(temperature),
-          ...(maxTokens.trim().length > 0 ? { maxTokens: Number.parseInt(maxTokens, 10) } : {})
-        }
+          : {})
       });
     },
     onSuccess: (payload) => {
@@ -376,61 +360,16 @@ export function ProjectRunsPage() {
                 </Select>
               </div>
               <div className="space-y-1">
-                <Label>Provider</Label>
-                <Select
-                  value={provider}
-                  onValueChange={(value) => {
-                    setProvider(value);
-                    setModelId("");
-                  }}
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select provider" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {(providersQuery.data ?? []).map((item) => (
-                      <SelectItem key={item} value={item}>
-                        {item}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-1">
-                <Label>Model</Label>
-                <Select value={modelId.length > 0 ? modelId : undefined} onValueChange={setModelId}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select model" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {(modelsQuery.data ?? []).map((model) => (
-                      <SelectItem key={model.id} value={model.id}>
-                        {model.id}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-1">
-                <Label>Reasoning Level</Label>
-                <Select value={reasoningLevel} onValueChange={setReasoningLevel}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {[
-                      "minimal",
-                      "low",
-                      "medium",
-                      "high",
-                      "xhigh"
-                    ].map((item) => (
-                      <SelectItem key={item} value={item}>
-                        {item}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <Label>Model (from Attractor)</Label>
+                <Input
+                  value={
+                    selectedAttractor?.modelConfig
+                      ? `${selectedAttractor.modelConfig.provider} / ${selectedAttractor.modelConfig.modelId}`
+                      : ""
+                  }
+                  placeholder="Select an attractor with model config"
+                  disabled
+                />
               </div>
               <div className="space-y-1">
                 <Label>Source Branch</Label>
@@ -448,16 +387,6 @@ export function ProjectRunsPage() {
                   <Input value={specBundleId} onChange={(event) => setSpecBundleId(event.target.value)} />
                 </div>
               ) : null}
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <Label>Temperature</Label>
-                  <Input value={temperature} onChange={(event) => setTemperature(event.target.value)} />
-                </div>
-                <div className="space-y-1">
-                  <Label>Max Tokens</Label>
-                  <Input value={maxTokens} onChange={(event) => setMaxTokens(event.target.value)} placeholder="optional" />
-                </div>
-              </div>
               <Button type="submit" disabled={createRunMutation.isPending}>
                 {createRunMutation.isPending ? "Queueing..." : "Queue Run"}
               </Button>

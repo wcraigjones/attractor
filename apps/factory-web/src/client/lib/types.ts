@@ -125,6 +125,7 @@ export interface AttractorDef {
   contentPath: string | null;
   contentVersion: number;
   defaultRunType: RunType;
+  modelConfig: RunModelConfig | null;
   description: string | null;
   active: boolean;
   createdAt: string;
@@ -163,6 +164,7 @@ export interface GlobalAttractor {
   contentPath: string | null;
   contentVersion: number;
   defaultRunType: RunType;
+  modelConfig: RunModelConfig | null;
   description: string | null;
   active: boolean;
   createdAt: string;
