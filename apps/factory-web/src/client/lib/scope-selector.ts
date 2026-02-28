@@ -13,8 +13,12 @@ export function isGlobalAttractorsPath(pathname: string): boolean {
   return pathname === "/attractors/global" || pathname.startsWith("/attractors/global/");
 }
 
+export function isGlobalEnvironmentsPath(pathname: string): boolean {
+  return pathname === "/environments/global" || pathname.startsWith("/environments/global/");
+}
+
 export function isGlobalScopePath(pathname: string): boolean {
-  return isGlobalSecretsPath(pathname) || isGlobalAttractorsPath(pathname);
+  return isGlobalSecretsPath(pathname) || isGlobalAttractorsPath(pathname) || isGlobalEnvironmentsPath(pathname);
 }
 
 export function resolveSelectedScope(input: {
@@ -33,7 +37,7 @@ export function resolveSelectedScope(input: {
 
 export function scopeToPath(scope: string): string {
   if (scope === GLOBAL_SCOPE_VALUE) {
-    return "/secrets/global";
+    return "/environments/global";
   }
   return `/projects/${scope}`;
 }

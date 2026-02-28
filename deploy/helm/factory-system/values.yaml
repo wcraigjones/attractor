@@ -45,6 +45,10 @@ github:
   reconcileIntervalMinutes: 15
   token: ""
 
+shell:
+  sessionTtlSeconds: 1800
+  podReadyTimeoutSeconds: 90
+
 ingress:
   enabled: true
   className: ""
