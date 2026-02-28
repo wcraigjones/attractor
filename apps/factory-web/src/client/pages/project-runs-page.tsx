@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -93,6 +93,18 @@ export function ProjectRunsPage() {
   const statusFilter = searchParams.get("status") ?? "all";
   const runTypeFilter = searchParams.get("runType") ?? "all";
   const branchFilter = searchParams.get("branch") ?? "";
+  const attractorFromQuery = searchParams.get("attractorDefId") ?? "";
+
+  useEffect(() => {
+    if (!attractorFromQuery) {
+      return;
+    }
+    const target = effectiveAttractors.find((item) => item.id === attractorFromQuery);
+    if (!target || !target.contentPath) {
+      return;
+    }
+    setAttractorDefId(attractorFromQuery);
+  }, [attractorFromQuery, effectiveAttractors]);
 
   const filteredRuns = useMemo(() => {
     return (runsQuery.data ?? []).filter((run) => {
@@ -323,8 +335,10 @@ export function ProjectRunsPage() {
                   </SelectTrigger>
                   <SelectContent>
                     {effectiveAttractors.map((attractor) => (
-                      <SelectItem key={attractor.id} value={attractor.id}>
+                      <SelectItem key={attractor.id} value={attractor.id} disabled={!attractor.contentPath || !attractor.active}>
                         {attractor.scope === "PROJECT" ? attractor.name : `${attractor.name} (global)`}
+                        {!attractor.contentPath ? " (legacy: recreate)" : ""}
+                        {!attractor.active ? " (inactive)" : ""}
                       </SelectItem>
                     ))}
                   </SelectContent>

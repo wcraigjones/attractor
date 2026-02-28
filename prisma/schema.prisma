@@ -155,6 +155,9 @@ model Run {
   id            String      @id @default(cuid())
   projectId     String
   attractorDefId String
+  attractorContentPath String?
+  attractorContentVersion Int?
+  attractorContentSha256 String?
   githubIssueId String?
   githubPullRequestId String?
   environmentId String?

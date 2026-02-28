@@ -29,8 +29,15 @@ import {
 } from "@aws-sdk/client-s3";
 import { z } from "zod";
 import {
+  lintDotGraph,
+  parseDotGraph,
+  serializeDotGraphCanonical,
+  type DotDiagnostic
+} from "@attractor/dot-engine";
+import {
   type EnvironmentResources,
   type RunExecutionEnvironment,
+  attractorUsesDotImplementation,
   runCancelKey,
   runEventChannel,
   runLockKey,
@@ -196,6 +203,19 @@ async function getObjectText(key: string): Promise<string | null> {
   }
 }
 
+async function attractorSupportsDotImplementation(attractor: {
+  contentPath: string | null;
+}): Promise<boolean> {
+  if (!attractor.contentPath) {
+    return false;
+  }
+  const content = await getObjectText(attractor.contentPath);
+  if (!content) {
+    return false;
+  }
+  return attractorUsesDotImplementation(content);
+}
+
 let attractorBucketReady = false;
 
 async function ensureAttractorBucket(): Promise<void> {
@@ -261,6 +281,154 @@ function toNullableText(value: string | undefined): string | null {
   }
   const normalized = value.trim();
   return normalized.length > 0 ? normalized : null;
+}
+
+interface AttractorValidationPayload {
+  valid: boolean;
+  errorCount: number;
+  warningCount: number;
+  diagnostics: DotDiagnostic[];
+}
+
+function parseAndLintAttractorContent(content: string): {
+  content: string;
+  validation: AttractorValidationPayload;
+} {
+  const trimmed = content.trim();
+  if (trimmed.length === 0) {
+    return {
+      content: "",
+      validation: {
+        valid: false,
+        errorCount: 1,
+        warningCount: 0,
+        diagnostics: [
+          {
+            rule: "content_required",
+            severity: "ERROR",
+            message: "Attractor content must not be empty"
+          }
+        ]
+      }
+    };
+  }
+
+  try {
+    const parsed = parseDotGraph(trimmed);
+    const diagnostics = lintDotGraph(parsed);
+    const errorCount = diagnostics.filter((item) => item.severity === "ERROR").length;
+    const warningCount = diagnostics.filter((item) => item.severity === "WARNING").length;
+    const canonical = serializeDotGraphCanonical(parsed);
+    return {
+      content: canonical,
+      validation: {
+        valid: errorCount === 0,
+        errorCount,
+        warningCount,
+        diagnostics
+      }
+    };
+  } catch (error) {
+    return {
+      content: trimmed,
+      validation: {
+        valid: false,
+        errorCount: 1,
+        warningCount: 0,
+        diagnostics: [
+          {
+            rule: "parse_error",
+            severity: "ERROR",
+            message: error instanceof Error ? error.message : String(error)
+          }
+        ]
+      }
+    };
+  }
+}
+
+async function loadAttractorContentFromStorage(contentPath: string | null): Promise<string | null> {
+  if (!contentPath) {
+    return null;
+  }
+  return getObjectText(contentPath);
+}
+
+function ensureAttractorContentValid(validation: AttractorValidationPayload): void {
+  if (validation.valid) {
+    return;
+  }
+  const message = validation.diagnostics
+    .filter((item) => item.severity === "ERROR")
+    .map((item) => item.message)
+    .join("; ");
+  throw new Error(message.length > 0 ? message : "attractor content failed validation");
+}
+
+async function resolveAttractorSnapshotForRun(attractor: {
+  id: string;
+  name: string;
+  scope: AttractorScope;
+  contentPath: string | null;
+  contentVersion: number;
+}): Promise<{ contentPath: string; contentVersion: number; contentSha256: string }> {
+  if (!attractor.contentPath || attractor.contentVersion <= 0) {
+    throw new Error(
+      `Attractor ${attractor.name} is legacy-only (repoPath) and cannot be used for new runs`
+    );
+  }
+
+  const versionRecord = await prisma.attractorDefVersion.findUnique({
+    where: {
+      attractorDefId_version: {
+        attractorDefId: attractor.id,
+        version: attractor.contentVersion
+      }
+    }
+  });
+
+  if (versionRecord) {
+    return {
+      contentPath: attractor.contentPath,
+      contentVersion: attractor.contentVersion,
+      contentSha256: versionRecord.contentSha256
+    };
+  }
+
+  if (attractor.scope === AttractorScope.GLOBAL) {
+    const global = await prisma.globalAttractor.findUnique({
+      where: { name: attractor.name },
+      select: { id: true }
+    });
+    if (global) {
+      const globalVersion = await prisma.globalAttractorVersion.findUnique({
+        where: {
+          globalAttractorId_version: {
+            globalAttractorId: global.id,
+            version: attractor.contentVersion
+          }
+        }
+      });
+      if (globalVersion) {
+        return {
+          contentPath: attractor.contentPath,
+          contentVersion: attractor.contentVersion,
+          contentSha256: globalVersion.contentSha256
+        };
+      }
+    }
+  }
+
+  const content = await loadAttractorContentFromStorage(attractor.contentPath);
+  if (!content) {
+    throw new Error(`Attractor storage content not found at ${attractor.contentPath}`);
+  }
+
+  return {
+    contentPath: attractor.contentPath,
+    contentVersion: attractor.contentVersion,
+    contentSha256: digestText(content)
+  };
 }
 
 function normalizeStoredChecklist(raw: unknown) {
@@ -1659,6 +1827,15 @@ app.post("/api/bootstrap/self", async (req, res) => {
       );
     }
   }
+  const bootstrapParsed = parseAndLintAttractorContent(bootstrapAttractorContent);
+  if (!bootstrapParsed.validation.valid) {
+    const message = bootstrapParsed.validation.diagnostics
+      .filter((item) => item.severity === "ERROR")
+      .map((item) => item.message)
+      .join("; ");
+    return sendError(res, 400, `bootstrap attractor content failed validation: ${message}`);
+  }
+  bootstrapAttractorContent = bootstrapParsed.content;
 
   const existingBootstrapAttractor = await prisma.attractorDef.findUnique({
     where: {
@@ -1860,6 +2037,22 @@ app.get("/api/secrets/global", async (_req, res) => {
   res.json({ secrets });
 });
 
+app.get("/api/secrets/global/:secretId/values", async (req, res) => {
+  const secret = await prisma.globalSecret.findUnique({
+    where: { id: req.params.secretId }
+  });
+  if (!secret) {
+    return sendError(res, 404, "global secret not found");
+  }
+
+  try {
+    const values = await readSecretValues(GLOBAL_SECRET_NAMESPACE, secret.k8sSecretName);
+    return res.json({ values });
+  } catch (error) {
+    return sendError(res, 404, error instanceof Error ? error.message : String(error));
+  }
+});
+
 app.post("/api/projects/:projectId/secrets", async (req, res) => {
   const input = createSecretSchema.safeParse(req.body);
   if (!input.success) {
@@ -1930,6 +2123,32 @@ app.get("/api/projects/:projectId/secrets", async (req, res) => {
   res.json({ secrets });
 });
 
+app.get("/api/projects/:projectId/secrets/:secretId/values", async (req, res) => {
+  const secret = await prisma.projectSecret.findFirst({
+    where: {
+      id: req.params.secretId,
+      projectId: req.params.projectId
+    },
+    include: {
+      project: {
+        select: {
+          namespace: true
+        }
+      }
+    }
+  });
+  if (!secret) {
+    return sendError(res, 404, "project secret not found");
+  }
+
+  try {
+    const values = await readSecretValues(secret.project.namespace, secret.k8sSecretName);
+    return res.json({ values });
+  } catch (error) {
+    return sendError(res, 404, error instanceof Error ? error.message : String(error));
+  }
+});
+
 const createAttractorSchema = z.object({
   name: z.string().min(1),
   content: z.string().min(1),
@@ -1939,16 +2158,80 @@ const createAttractorSchema = z.object({
   active: z.boolean().optional()
 });
 
+const patchAttractorSchema = z
+  .object({
+    name: z.string().min(1).optional(),
+    content: z.string().optional(),
+    repoPath: z.string().nullable().optional(),
+    defaultRunType: z.enum(["planning", "implementation", "task"]).optional(),
+    description: z.string().nullable().optional(),
+    active: z.boolean().optional(),
+    expectedContentVersion: z.number().int().nonnegative().optional()
+  })
+  .refine((value) => Object.keys(value).length > 0, { message: "at least one field is required" });
+
+async function buildAttractorContentPayload(contentPath: string | null): Promise<{
+  content: string | null;
+  validation: AttractorValidationPayload;
+}> {
+  if (!contentPath) {
+    return {
+      content: null,
+      validation: {
+        valid: false,
+        errorCount: 1,
+        warningCount: 0,
+        diagnostics: [
+          {
+            rule: "legacy_content_source",
+            severity: "ERROR",
+            message: "Attractor has no storage-backed content (legacy repoPath only)."
+          }
+        ]
+      }
+    };
+  }
+
+  const stored = await loadAttractorContentFromStorage(contentPath);
+  if (!stored) {
+    return {
+      content: null,
+      validation: {
+        valid: false,
+        errorCount: 1,
+        warningCount: 0,
+        diagnostics: [
+          {
+            rule: "storage_content_missing",
+            severity: "ERROR",
+            message: `Attractor content missing at storage path ${contentPath}`
+          }
+        ]
+      }
+    };
+  }
+
+  const parsed = parseAndLintAttractorContent(stored);
+  return {
+    content: parsed.content,
+    validation: parsed.validation
+  };
+}
+
 app.post("/api/attractors/global", async (req, res) => {
   const input = createAttractorSchema.safeParse(req.body);
   if (!input.success) {
     return sendError(res, 400, input.error.message);
   }
 
-  const content = input.data.content.trim();
-  if (content.length === 0) {
-    return sendError(res, 400, "attractor content must not be empty");
+  const parsed = parseAndLintAttractorContent(input.data.content);
+  if (!parsed.validation.valid) {
+    return res.status(400).json({
+      error: "attractor content failed validation",
+      validation: parsed.validation
+    });
   }
+  const content = parsed.content;
 
   const existing = await prisma.globalAttractor.findUnique({
     where: { name: input.data.name }
@@ -2028,16 +2311,199 @@ app.get("/api/attractors/global", async (_req, res) => {
   res.json({ attractors });
 });
 
+app.get("/api/attractors/global/:attractorId", async (req, res) => {
+  const attractor = await prisma.globalAttractor.findUnique({
+    where: { id: req.params.attractorId }
+  });
+  if (!attractor) {
+    return sendError(res, 404, "global attractor not found");
+  }
+
+  const payload = await buildAttractorContentPayload(attractor.contentPath);
+  res.json({
+    attractor,
+    content: payload.content,
+    validation: payload.validation
+  });
+});
+
+app.get("/api/attractors/global/:attractorId/versions", async (req, res) => {
+  const attractor = await prisma.globalAttractor.findUnique({
+    where: { id: req.params.attractorId },
+    select: { id: true }
+  });
+  if (!attractor) {
+    return sendError(res, 404, "global attractor not found");
+  }
+
+  const versions = await prisma.globalAttractorVersion.findMany({
+    where: { globalAttractorId: attractor.id },
+    orderBy: { version: "desc" }
+  });
+  res.json({ versions });
+});
+
+app.get("/api/attractors/global/:attractorId/versions/:version", async (req, res) => {
+  const version = Number.parseInt(req.params.version, 10);
+  if (!Number.isInteger(version) || version <= 0) {
+    return sendError(res, 400, "version must be a positive integer");
+  }
+
+  const attractor = await prisma.globalAttractor.findUnique({
+    where: { id: req.params.attractorId },
+    select: { id: true }
+  });
+  if (!attractor) {
+    return sendError(res, 404, "global attractor not found");
+  }
+
+  const versionRow = await prisma.globalAttractorVersion.findUnique({
+    where: {
+      globalAttractorId_version: {
+        globalAttractorId: attractor.id,
+        version
+      }
+    }
+  });
+  if (!versionRow) {
+    return sendError(res, 404, "global attractor version not found");
+  }
+
+  const payload = await buildAttractorContentPayload(versionRow.contentPath);
+  res.json({
+    version: versionRow,
+    content: payload.content,
+    validation: payload.validation
+  });
+});
+
+app.patch("/api/attractors/global/:attractorId", async (req, res) => {
+  const input = patchAttractorSchema.safeParse(req.body);
+  if (!input.success) {
+    return sendError(res, 400, input.error.message);
+  }
+
+  const current = await prisma.globalAttractor.findUnique({
+    where: { id: req.params.attractorId }
+  });
+  if (!current) {
+    return sendError(res, 404, "global attractor not found");
+  }
+
+  if (
+    input.data.expectedContentVersion !== undefined &&
+    current.contentVersion !== input.data.expectedContentVersion
+  ) {
+    return sendError(
+      res,
+      409,
+      `content version mismatch: expected ${input.data.expectedContentVersion}, current ${current.contentVersion}`
+    );
+  }
+
+  let nextContentPath = current.contentPath;
+  let nextContentVersion = current.contentVersion;
+  let parsedContent: string | null = null;
+  let parsedValidation: AttractorValidationPayload | null = null;
+
+  if (input.data.content !== undefined) {
+    const parsed = parseAndLintAttractorContent(input.data.content);
+    parsedContent = parsed.content;
+    parsedValidation = parsed.validation;
+    if (!parsed.validation.valid) {
+      return res.status(400).json({
+        error: "attractor content failed validation",
+        validation: parsed.validation
+      });
+    }
+
+    const latestVersion =
+      current.contentVersion > 0
+        ? await prisma.globalAttractorVersion.findUnique({
+            where: {
+              globalAttractorId_version: {
+                globalAttractorId: current.id,
+                version: current.contentVersion
+              }
+            }
+          })
+        : null;
+    const contentSha256 = digestText(parsed.content);
+    const needsNewVersion =
+      !current.contentPath ||
+      current.contentVersion <= 0 ||
+      !latestVersion ||
+      latestVersion.contentSha256 !== contentSha256;
+
+    if (needsNewVersion) {
+      nextContentVersion = Math.max(current.contentVersion, 0) + 1;
+      nextContentPath = attractorObjectPath({
+        scope: "global",
+        name: input.data.name ?? current.name,
+        version: nextContentVersion
+      });
+      await putAttractorContent(nextContentPath, parsed.content);
+      await prisma.globalAttractorVersion.create({
+        data: {
+          globalAttractorId: current.id,
+          version: nextContentVersion,
+          contentPath: nextContentPath,
+          contentSha256,
+          sizeBytes: Buffer.byteLength(parsed.content, "utf8")
+        }
+      });
+    }
+  }
+
+  let updated;
+  try {
+    updated = await prisma.globalAttractor.update({
+      where: { id: current.id },
+      data: {
+        ...(input.data.name !== undefined ? { name: input.data.name } : {}),
+        ...(input.data.repoPath !== undefined ? { repoPath: toNullableText(input.data.repoPath ?? undefined) } : {}),
+        ...(input.data.defaultRunType !== undefined ? { defaultRunType: input.data.defaultRunType } : {}),
+        ...(input.data.description !== undefined ? { description: toNullableText(input.data.description ?? undefined) } : {}),
+        ...(input.data.active !== undefined ? { active: input.data.active } : {}),
+        ...(input.data.content !== undefined
+          ? {
+              contentPath: nextContentPath,
+              contentVersion: nextContentVersion
+            }
+          : {})
+      }
+    });
+  } catch (error) {
+    return sendError(res, 409, error instanceof Error ? error.message : String(error));
+  }
+
+  await propagateGlobalAttractorToAllProjects(updated);
+
+  const payload =
+    parsedValidation && parsedContent
+      ? { content: parsedContent, validation: parsedValidation }
+      : await buildAttractorContentPayload(updated.contentPath);
+  res.json({
+    attractor: updated,
+    content: payload.content,
+    validation: payload.validation
+  });
+});
+
 app.post("/api/projects/:projectId/attractors", async (req, res) => {
   const input = createAttractorSchema.safeParse(req.body);
   if (!input.success) {
     return sendError(res, 400, input.error.message);
   }
 
-  const content = input.data.content.trim();
-  if (content.length === 0) {
-    return sendError(res, 400, "attractor content must not be empty");
+  const parsed = parseAndLintAttractorContent(input.data.content);
+  if (!parsed.validation.valid) {
+    return res.status(400).json({
+      error: "attractor content failed validation",
+      validation: parsed.validation
+    });
   }
+  const content = parsed.content;
 
   const existing = await prisma.attractorDef.findUnique({
     where: {
@@ -2129,6 +2595,249 @@ app.get("/api/projects/:projectId/attractors", async (req, res) => {
   res.json({ attractors });
 });
 
+app.get("/api/projects/:projectId/attractors/:attractorId", async (req, res) => {
+  const attractor = await prisma.attractorDef.findFirst({
+    where: {
+      id: req.params.attractorId,
+      projectId: req.params.projectId
+    }
+  });
+  if (!attractor) {
+    return sendError(res, 404, "attractor not found in project");
+  }
+
+  const payload = await buildAttractorContentPayload(attractor.contentPath);
+  res.json({
+    attractor,
+    content: payload.content,
+    validation: payload.validation
+  });
+});
+
+app.get("/api/projects/:projectId/attractors/:attractorId/versions", async (req, res) => {
+  const attractor = await prisma.attractorDef.findFirst({
+    where: {
+      id: req.params.attractorId,
+      projectId: req.params.projectId
+    },
+    select: {
+      id: true,
+      scope: true,
+      name: true
+    }
+  });
+  if (!attractor) {
+    return sendError(res, 404, "attractor not found in project");
+  }
+
+  if (attractor.scope === AttractorScope.GLOBAL) {
+    const global = await prisma.globalAttractor.findUnique({
+      where: { name: attractor.name },
+      select: { id: true }
+    });
+    if (!global) {
+      return sendError(res, 404, "global attractor backing record not found");
+    }
+    const versions = await prisma.globalAttractorVersion.findMany({
+      where: { globalAttractorId: global.id },
+      orderBy: { version: "desc" }
+    });
+    return res.json({ versions });
+  }
+
+  const versions = await prisma.attractorDefVersion.findMany({
+    where: { attractorDefId: attractor.id },
+    orderBy: { version: "desc" }
+  });
+  res.json({ versions });
+});
+
+app.get("/api/projects/:projectId/attractors/:attractorId/versions/:version", async (req, res) => {
+  const version = Number.parseInt(req.params.version, 10);
+  if (!Number.isInteger(version) || version <= 0) {
+    return sendError(res, 400, "version must be a positive integer");
+  }
+
+  const attractor = await prisma.attractorDef.findFirst({
+    where: {
+      id: req.params.attractorId,
+      projectId: req.params.projectId
+    },
+    select: {
+      id: true,
+      scope: true,
+      name: true
+    }
+  });
+  if (!attractor) {
+    return sendError(res, 404, "attractor not found in project");
+  }
+
+  if (attractor.scope === AttractorScope.GLOBAL) {
+    const global = await prisma.globalAttractor.findUnique({
+      where: { name: attractor.name },
+      select: { id: true }
+    });
+    if (!global) {
+      return sendError(res, 404, "global attractor backing record not found");
+    }
+    const versionRow = await prisma.globalAttractorVersion.findUnique({
+      where: {
+        globalAttractorId_version: {
+          globalAttractorId: global.id,
+          version
+        }
+      }
+    });
+    if (!versionRow) {
+      return sendError(res, 404, "attractor version not found");
+    }
+    const payload = await buildAttractorContentPayload(versionRow.contentPath);
+    return res.json({
+      version: versionRow,
+      content: payload.content,
+      validation: payload.validation
+    });
+  }
+
+  const versionRow = await prisma.attractorDefVersion.findUnique({
+    where: {
+      attractorDefId_version: {
+        attractorDefId: attractor.id,
+        version
+      }
+    }
+  });
+  if (!versionRow) {
+    return sendError(res, 404, "attractor version not found");
+  }
+
+  const payload = await buildAttractorContentPayload(versionRow.contentPath);
+  res.json({
+    version: versionRow,
+    content: payload.content,
+    validation: payload.validation
+  });
+});
+
+app.patch("/api/projects/:projectId/attractors/:attractorId", async (req, res) => {
+  const input = patchAttractorSchema.safeParse(req.body);
+  if (!input.success) {
+    return sendError(res, 400, input.error.message);
+  }
+
+  const current = await prisma.attractorDef.findFirst({
+    where: {
+      id: req.params.attractorId,
+      projectId: req.params.projectId
+    }
+  });
+  if (!current) {
+    return sendError(res, 404, "attractor not found in project");
+  }
+  if (current.scope !== AttractorScope.PROJECT) {
+    return sendError(res, 409, "inherited global attractors are read-only in project scope");
+  }
+
+  if (
+    input.data.expectedContentVersion !== undefined &&
+    current.contentVersion !== input.data.expectedContentVersion
+  ) {
+    return sendError(
+      res,
+      409,
+      `content version mismatch: expected ${input.data.expectedContentVersion}, current ${current.contentVersion}`
+    );
+  }
+
+  let nextContentPath = current.contentPath;
+  let nextContentVersion = current.contentVersion;
+  let parsedContent: string | null = null;
+  let parsedValidation: AttractorValidationPayload | null = null;
+
+  if (input.data.content !== undefined) {
+    const parsed = parseAndLintAttractorContent(input.data.content);
+    parsedContent = parsed.content;
+    parsedValidation = parsed.validation;
+    if (!parsed.validation.valid) {
+      return res.status(400).json({
+        error: "attractor content failed validation",
+        validation: parsed.validation
+      });
+    }
+
+    const latestVersion =
+      current.contentVersion > 0
+        ? await prisma.attractorDefVersion.findUnique({
+            where: {
+              attractorDefId_version: {
+                attractorDefId: current.id,
+                version: current.contentVersion
+              }
+            }
+          })
+        : null;
+    const contentSha256 = digestText(parsed.content);
+    const needsNewVersion =
+      !current.contentPath ||
+      current.contentVersion <= 0 ||
+      !latestVersion ||
+      latestVersion.contentSha256 !== contentSha256;
+
+    if (needsNewVersion) {
+      nextContentVersion = Math.max(current.contentVersion, 0) + 1;
+      nextContentPath = attractorObjectPath({
+        scope: "project",
+        projectId: req.params.projectId,
+        name: input.data.name ?? current.name,
+        version: nextContentVersion
+      });
+      await putAttractorContent(nextContentPath, parsed.content);
+      await prisma.attractorDefVersion.create({
+        data: {
+          attractorDefId: current.id,
+          version: nextContentVersion,
+          contentPath: nextContentPath,
+          contentSha256,
+          sizeBytes: Buffer.byteLength(parsed.content, "utf8")
+        }
+      });
+    }
+  }
+
+  let updated;
+  try {
+    updated = await prisma.attractorDef.update({
+      where: { id: current.id },
+      data: {
+        ...(input.data.name !== undefined ? { name: input.data.name } : {}),
+        ...(input.data.repoPath !== undefined ? { repoPath: toNullableText(input.data.repoPath ?? undefined) } : {}),
+        ...(input.data.defaultRunType !== undefined ? { defaultRunType: input.data.defaultRunType } : {}),
+        ...(input.data.description !== undefined ? { description: toNullableText(input.data.description ?? undefined) } : {}),
+        ...(input.data.active !== undefined ? { active: input.data.active } : {}),
+        ...(input.data.content !== undefined
+          ? {
+              contentPath: nextContentPath,
+              contentVersion: nextContentVersion
+            }
+          : {})
+      }
+    });
+  } catch (error) {
+    return sendError(res, 409, error instanceof Error ? error.message : String(error));
+  }
+
+  const payload =
+    parsedValidation && parsedContent
+      ? { content: parsedContent, validation: parsedValidation }
+      : await buildAttractorContentPayload(updated.contentPath);
+  res.json({
+    attractor: updated,
+    content: payload.content,
+    validation: payload.validation
+  });
+});
+
 app.get("/api/projects/:projectId/runs", async (req, res) => {
   const runs = await prisma.run.findMany({
     where: { projectId: req.params.projectId },
@@ -2194,6 +2903,19 @@ app.post("/api/runs", async (req, res) => {
     return sendError(res, 409, "attractor definition is inactive");
   }
 
+  let attractorSnapshot;
+  try {
+    attractorSnapshot = await resolveAttractorSnapshotForRun({
+      id: attractorDef.id,
+      name: attractorDef.name,
+      scope: attractorDef.scope,
+      contentPath: attractorDef.contentPath,
+      contentVersion: attractorDef.contentVersion
+    });
+  } catch (error) {
+    return sendError(res, 409, error instanceof Error ? error.message : String(error));
+  }
+
   if (input.data.runType === "planning" && input.data.specBundleId) {
     return sendError(res, 400, "planning runs must not set specBundleId");
   }
@@ -2202,8 +2924,18 @@ app.post("/api/runs", async (req, res) => {
     return sendError(res, 400, "task runs must not set specBundleId");
   }
 
+  let dotImplementationWithoutSpecBundle = false;
   if (input.data.runType === "implementation" && !input.data.specBundleId) {
-    return sendError(res, 400, "implementation runs require specBundleId");
+    dotImplementationWithoutSpecBundle = await attractorSupportsDotImplementation({
+      contentPath: attractorDef.contentPath
+    });
+    if (!dotImplementationWithoutSpecBundle) {
+      return sendError(
+        res,
+        400,
+        "implementation runs require specBundleId unless the attractor enables DOT implementation mode"
+      );
+    }
   }
 
   if (input.data.specBundleId) {
@@ -2251,13 +2983,16 @@ app.post("/api/runs", async (req, res) => {
     data: {
       projectId: project.id,
       attractorDefId: attractorDef.id,
+      attractorContentPath: attractorSnapshot.contentPath,
+      attractorContentVersion: attractorSnapshot.contentVersion,
+      attractorContentSha256: attractorSnapshot.contentSha256,
       environmentId: resolvedEnvironment.id,
       environmentSnapshot: resolvedEnvironment.snapshot as never,
       runType: input.data.runType,
       sourceBranch: input.data.sourceBranch,
       targetBranch: input.data.targetBranch,
       status: RunStatus.QUEUED,
-      specBundleId: input.data.specBundleId
+      specBundleId: dotImplementationWithoutSpecBundle ? null : input.data.specBundleId
     }
   });
 
@@ -2266,6 +3001,8 @@ app.post("/api/runs", async (req, res) => {
     runType: run.runType,
     projectId: run.projectId,
     targetBranch: run.targetBranch,
+    dotImplementationWithoutSpecBundle,
+    attractorSnapshot,
     modelConfig: input.data.modelConfig,
     environment: resolvedEnvironment.snapshot,
     runnerImage: resolvedEnvironment.snapshot.runnerImage
@@ -2351,21 +3088,40 @@ app.post("/api/projects/:projectId/github/issues/:issueNumber/runs", async (req,
     return sendError(res, 409, "attractor definition is inactive");
   }
 
-  let resolvedSpecBundleId = input.data.specBundleId;
-  if (input.data.runType === "implementation" && !resolvedSpecBundleId) {
-    const latestPlanningRun = await prisma.run.findFirst({
-      where: {
-        projectId: project.id,
-        runType: RunType.planning,
-        status: RunStatus.SUCCEEDED,
-        specBundleId: { not: null }
-      },
-      orderBy: { finishedAt: "desc" }
+  let attractorSnapshot;
+  try {
+    attractorSnapshot = await resolveAttractorSnapshotForRun({
+      id: attractorDef.id,
+      name: attractorDef.name,
+      scope: attractorDef.scope,
+      contentPath: attractorDef.contentPath,
+      contentVersion: attractorDef.contentVersion
     });
-    if (!latestPlanningRun?.specBundleId) {
-      return sendError(res, 409, "no successful planning run with a spec bundle is available");
+  } catch (error) {
+    return sendError(res, 409, error instanceof Error ? error.message : String(error));
+  }
+
+  let resolvedSpecBundleId = input.data.specBundleId;
+  let dotImplementationWithoutSpecBundle = false;
+  if (input.data.runType === "implementation" && !resolvedSpecBundleId) {
+    dotImplementationWithoutSpecBundle = await attractorSupportsDotImplementation({
+      contentPath: attractorDef.contentPath
+    });
+    if (!dotImplementationWithoutSpecBundle) {
+      const latestPlanningRun = await prisma.run.findFirst({
+        where: {
+          projectId: project.id,
+          runType: RunType.planning,
+          status: RunStatus.SUCCEEDED,
+          specBundleId: { not: null }
+        },
+        orderBy: { finishedAt: "desc" }
+      });
+      if (!latestPlanningRun?.specBundleId) {
+        return sendError(res, 409, "no successful planning run with a spec bundle is available");
+      }
+      resolvedSpecBundleId = latestPlanningRun.specBundleId;
     }
-    resolvedSpecBundleId = latestPlanningRun.specBundleId;
   }
 
   let resolvedEnvironment;
@@ -2385,6 +3141,9 @@ app.post("/api/projects/:projectId/github/issues/:issueNumber/runs", async (req,
     data: {
       projectId: project.id,
       attractorDefId: attractorDef.id,
+      attractorContentPath: attractorSnapshot.contentPath,
+      attractorContentVersion: attractorSnapshot.contentVersion,
+      attractorContentSha256: attractorSnapshot.contentSha256,
       githubIssueId: issue.id,
       environmentId: resolvedEnvironment.id,
       environmentSnapshot: resolvedEnvironment.snapshot as never,
@@ -2404,6 +3163,8 @@ app.post("/api/projects/:projectId/github/issues/:issueNumber/runs", async (req,
     runType: run.runType,
     projectId: run.projectId,
     targetBranch: run.targetBranch,
+    dotImplementationWithoutSpecBundle,
+    attractorSnapshot,
     modelConfig: input.data.modelConfig,
     environment: resolvedEnvironment.snapshot,
     runnerImage: resolvedEnvironment.snapshot.runnerImage,
@@ -2473,6 +3234,22 @@ app.post("/api/projects/:projectId/self-iterate", async (req, res) => {
   if (!attractorDef || attractorDef.projectId !== project.id) {
     return sendError(res, 404, "attractor definition not found in project");
   }
+  if (!attractorDef.active) {
+    return sendError(res, 409, "attractor definition is inactive");
+  }
+
+  let attractorSnapshot;
+  try {
+    attractorSnapshot = await resolveAttractorSnapshotForRun({
+      id: attractorDef.id,
+      name: attractorDef.name,
+      scope: attractorDef.scope,
+      contentPath: attractorDef.contentPath,
+      contentVersion: attractorDef.contentVersion
+    });
+  } catch (error) {
+    return sendError(res, 409, error instanceof Error ? error.message : String(error));
+  }
 
   const latestPlanningRun = await prisma.run.findFirst({
     where: {
@@ -2523,6 +3300,9 @@ app.post("/api/projects/:projectId/self-iterate", async (req, res) => {
     data: {
       projectId: project.id,
       attractorDefId: attractorDef.id,
+      attractorContentPath: attractorSnapshot.contentPath,
+      attractorContentVersion: attractorSnapshot.contentVersion,
+      attractorContentSha256: attractorSnapshot.contentSha256,
       environmentId: resolvedEnvironment.id,
       environmentSnapshot: resolvedEnvironment.snapshot as never,
       runType: RunType.implementation,
@@ -2538,6 +3318,7 @@ app.post("/api/projects/:projectId/self-iterate", async (req, res) => {
     runType: run.runType,
     projectId: run.projectId,
     targetBranch: run.targetBranch,
+    attractorSnapshot,
     modelConfig: input.data.modelConfig,
     environment: resolvedEnvironment.snapshot,
     runnerImage: resolvedEnvironment.snapshot.runnerImage,

@@ -41,6 +41,22 @@ npm run check-types
 npm run test
 ```
 
+## Conformance Suite
+
+This repo includes the upstream `fkyeah` conformance suite under `conformance/`.
+
+Run deterministic categories (`01`-`06`) with live-model categories (`07`/`08`) skipped:
+
+```bash
+npm run test:conformance
+```
+
+Run the full suite (including live-model tests) when API keys are configured:
+
+```bash
+ATTRACTOR_BIN=~/bin/attractor npm run test:conformance:all
+```
+
 For iterative work (service-by-service):
 
 ```bash
@@ -79,11 +95,13 @@ Web route map:
 - `/projects`
 - `/environments/global`
 - `/attractors/global`
+- `/attractors/global/:attractorId`
 - `/secrets/global`
 - `/projects/:projectId`
 - `/projects/:projectId/environments`
 - `/projects/:projectId/secrets`
 - `/projects/:projectId/attractors`
+- `/projects/:projectId/attractors/:attractorId`
 - `/projects/:projectId/github/issues`
 - `/projects/:projectId/github/issues/:issueNumber`
 - `/projects/:projectId/github/pulls`
@@ -167,6 +185,10 @@ Implemented endpoints:
 - `GET /api/secrets/global`
 - `POST /api/attractors/global`
 - `GET /api/attractors/global`
+- `GET /api/attractors/global/{attractorId}`
+- `PATCH /api/attractors/global/{attractorId}`
+- `GET /api/attractors/global/{attractorId}/versions`
+- `GET /api/attractors/global/{attractorId}/versions/{version}`
 - `POST /api/projects`
 - `GET /api/projects`
 - `POST /api/projects/{projectId}/environment`
@@ -183,6 +205,10 @@ Implemented endpoints:
 - `GET /api/projects/{projectId}/secrets`
 - `POST /api/projects/{projectId}/attractors`
 - `GET /api/projects/{projectId}/attractors`
+- `GET /api/projects/{projectId}/attractors/{attractorId}`
+- `PATCH /api/projects/{projectId}/attractors/{attractorId}`
+- `GET /api/projects/{projectId}/attractors/{attractorId}/versions`
+- `GET /api/projects/{projectId}/attractors/{attractorId}/versions/{version}`
 - `GET /api/projects/{projectId}/runs`
 - `POST /api/runs`
 - `POST /api/projects/{projectId}/self-iterate`

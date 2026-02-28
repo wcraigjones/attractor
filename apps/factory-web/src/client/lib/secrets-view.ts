@@ -6,10 +6,12 @@ export type SecretRowStatus = "Project" | "Inherited" | "Partially Overridden" |
 
 export interface SecretViewRow {
   id: string;
+  secretId: string;
   source: "project" | "global";
   name: string;
   provider: string;
   k8sSecretName: string;
+  keyMappings: Record<string, string>;
   status: SecretRowStatus;
   muted: boolean;
 }
@@ -56,10 +58,12 @@ export function buildProjectSecretsViewRows(
 
   const projectRows: SecretViewRow[] = projectSecrets.map((secret) => ({
     id: `project:${secret.id}`,
+    secretId: secret.id,
     source: "project",
     name: secret.name,
     provider: secret.provider,
     k8sSecretName: secret.k8sSecretName,
+    keyMappings: secret.keyMappings,
     status: "Project",
     muted: false
   }));
@@ -80,10 +84,12 @@ export function buildProjectSecretsViewRows(
 
     return {
       id: `global:${secret.id}`,
+      secretId: secret.id,
       source: "global",
       name: secret.name,
       provider: secret.provider,
       k8sSecretName: secret.k8sSecretName,
+      keyMappings: secret.keyMappings,
       status,
       muted: status !== "Inherited"
     };

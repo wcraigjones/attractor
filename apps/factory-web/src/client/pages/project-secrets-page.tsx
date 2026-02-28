@@ -3,12 +3,20 @@ import { useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
-import { listGlobalSecrets, listProjectSecrets, listProviderSchemas, upsertProjectSecret } from "../lib/api";
+import {
+  getGlobalSecretValues,
+  getProjectSecretValues,
+  listGlobalSecrets,
+  listProjectSecrets,
+  listProviderSchemas,
+  upsertProjectSecret
+} from "../lib/api";
 import {
   ARBITRARY_SECRET_PROVIDER,
   buildProjectSecretsViewRows,
   formatSecretProvider,
-  type SecretRowStatus
+  type SecretRowStatus,
+  type SecretViewRow
 } from "../lib/secrets-view";
 import type { ProviderSchema } from "../lib/types";
 import { PageTitle } from "../components/layout/page-title";
@@ -54,6 +62,17 @@ function statusVariant(status: SecretRowStatus): "default" | "secondary" | "succ
   return "secondary";
 }
 
+function firstKeyMapping(keyMappings: Record<string, string>): [string, string] {
+  return Object.entries(keyMappings)[0] ?? ["", ""];
+}
+
+function maskSecretValue(value: string): string {
+  if (!value) {
+    return "••••••••";
+  }
+  return "•".repeat(Math.min(Math.max(value.length, 8), 16));
+}
+
 export function ProjectSecretsPage() {
   const params = useParams<{ projectId: string }>();
   const projectId = params.projectId ?? "";
@@ -72,6 +91,10 @@ export function ProjectSecretsPage() {
   const [projectLogicalKey, setProjectLogicalKey] = useState("apiKey");
   const [projectSecretKey, setProjectSecretKey] = useState("openai_api_key");
   const [projectSecretValue, setProjectSecretValue] = useState("");
+  const [editingProjectSecretId, setEditingProjectSecretId] = useState<string | null>(null);
+  const [revealedByRowId, setRevealedByRowId] = useState<Record<string, boolean>>({});
+  const [valuesByRowId, setValuesByRowId] = useState<Record<string, Record<string, string>>>({});
+  const [loadingByRowId, setLoadingByRowId] = useState<Record<string, boolean>>({});
 
   const schemaByProvider = useMemo(() => {
     return Object.fromEntries((schemasQuery.data ?? []).map((schema) => [schema.provider, schema]));
@@ -98,6 +121,82 @@ export function ProjectSecretsPage() {
     setProjectSecretKey(defaultSecretKey(firstSchema, logicalKey));
   }, [projectProvider, schemaByProvider, schemasQuery.data]);
 
+  const loadValues = async (row: SecretViewRow): Promise<Record<string, string> | null> => {
+    setLoadingByRowId((current) => ({ ...current, [row.id]: true }));
+    try {
+      const values =
+        row.source === "project"
+          ? await getProjectSecretValues(projectId, row.secretId)
+          : await getGlobalSecretValues(row.secretId);
+      setValuesByRowId((current) => ({ ...current, [row.id]: values }));
+      return values;
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+      return null;
+    } finally {
+      setLoadingByRowId((current) => ({ ...current, [row.id]: false }));
+    }
+  };
+
+  const toggleRowVisibility = async (row: SecretViewRow): Promise<void> => {
+    if (revealedByRowId[row.id]) {
+      setRevealedByRowId((current) => ({ ...current, [row.id]: false }));
+      return;
+    }
+
+    let values: Record<string, string> | undefined = valuesByRowId[row.id];
+    if (!values) {
+      const loadedValues = await loadValues(row);
+      if (!loadedValues) {
+        return;
+      }
+      values = loadedValues;
+    }
+
+    setRevealedByRowId((current) => ({ ...current, [row.id]: true }));
+  };
+
+  const beginEdit = async (row: SecretViewRow): Promise<void> => {
+    if (row.source !== "project") {
+      return;
+    }
+
+    const [mappedLogicalKey, mappedSecretKey] = firstKeyMapping(row.keyMappings);
+    const schema = schemaByProvider[row.provider];
+    setEditingProjectSecretId(row.secretId);
+    setProjectProvider(row.provider);
+    setProjectName(row.name);
+
+    if (row.provider === ARBITRARY_SECRET_PROVIDER) {
+      setProjectLogicalKey("secret");
+      setProjectSecretKey(mappedSecretKey || mappedLogicalKey || "custom_secret");
+    } else {
+      const nextLogicalKey = mappedLogicalKey || firstLogicalKey(schema);
+      setProjectLogicalKey(nextLogicalKey);
+      setProjectSecretKey(mappedSecretKey || defaultSecretKey(schema, nextLogicalKey));
+    }
+
+    let values: Record<string, string> | undefined = valuesByRowId[row.id];
+    if (!values) {
+      const loadedValues = await loadValues(row);
+      if (loadedValues) {
+        values = loadedValues;
+      }
+    }
+    if (!values) {
+      setProjectSecretValue("");
+      return;
+    }
+
+    const valueKey = mappedSecretKey || mappedLogicalKey || Object.keys(values)[0] || "";
+    setProjectSecretValue(valueKey ? values[valueKey] ?? "" : "");
+  };
+
+  const clearEdit = () => {
+    setEditingProjectSecretId(null);
+    setProjectSecretValue("");
+  };
+
   const projectMutation = useMutation({
     mutationFn: () =>
       {
@@ -114,6 +213,16 @@ export function ProjectSecretsPage() {
       },
     onSuccess: () => {
       toast.success("Project secret saved");
+      if (editingProjectSecretId) {
+        const rowId = `project:${editingProjectSecretId}`;
+        setValuesByRowId((current) => {
+          const next = { ...current };
+          delete next[rowId];
+          return next;
+        });
+        setRevealedByRowId((current) => ({ ...current, [rowId]: false }));
+      }
+      setEditingProjectSecretId(null);
       setProjectSecretValue("");
       void queryClient.invalidateQueries({ queryKey: ["project-secrets", projectId] });
     },
@@ -139,7 +248,7 @@ export function ProjectSecretsPage() {
       <div className="grid gap-4 lg:grid-cols-[1fr,2fr]">
         <Card>
           <CardHeader>
-            <CardTitle>Project Secret</CardTitle>
+            <CardTitle>{editingProjectSecretId ? "Edit Project Secret" : "Project Secret"}</CardTitle>
             <CardDescription>Stored in project namespace and used first for provider auth and custom config.</CardDescription>
           </CardHeader>
           <CardContent>
@@ -171,6 +280,7 @@ export function ProjectSecretsPage() {
                 <Select
                   value={projectProvider}
                   onValueChange={(provider) => {
+                    setEditingProjectSecretId(null);
                     if (provider === ARBITRARY_SECRET_PROVIDER) {
                       setProjectProvider(provider);
                       setProjectName("project-custom");
@@ -241,9 +351,16 @@ export function ProjectSecretsPage() {
                   onChange={(event) => setProjectSecretValue(event.target.value)}
                 />
               </div>
-              <Button type="submit" disabled={projectMutation.isPending}>
-                {projectMutation.isPending ? "Saving..." : "Save Project Secret"}
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button type="submit" disabled={projectMutation.isPending}>
+                  {projectMutation.isPending ? "Saving..." : editingProjectSecretId ? "Update Project Secret" : "Save Project Secret"}
+                </Button>
+                {editingProjectSecretId ? (
+                  <Button type="button" variant="outline" onClick={clearEdit}>
+                    Cancel Edit
+                  </Button>
+                ) : null}
+              </div>
             </form>
           </CardContent>
         </Card>
@@ -263,28 +380,85 @@ export function ProjectSecretsPage() {
                   <TableHead>Name</TableHead>
                   <TableHead>Provider</TableHead>
                   <TableHead>Status</TableHead>
+                  <TableHead>Secret Keys</TableHead>
+                  <TableHead>Value</TableHead>
                   <TableHead>K8s Secret</TableHead>
+                  <TableHead>Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {effectiveRows.map((row) => (
-                  <TableRow
-                    key={row.id}
-                    className={row.muted ? "bg-muted/20 text-muted-foreground hover:bg-muted/20" : undefined}
-                  >
-                    <TableCell>
-                      <Badge variant={row.source === "project" ? "default" : "outline"}>
-                        {row.source === "project" ? "Project" : "Global"}
-                      </Badge>
-                    </TableCell>
-                    <TableCell>{row.name}</TableCell>
-                    <TableCell>{formatSecretProvider(row.provider)}</TableCell>
-                    <TableCell>
-                      <Badge variant={statusVariant(row.status)}>{row.status}</Badge>
-                    </TableCell>
-                    <TableCell className="mono text-xs">{row.k8sSecretName}</TableCell>
-                  </TableRow>
-                ))}
+                {effectiveRows.map((row) => {
+                  const loadedValues = valuesByRowId[row.id] ?? {};
+                  const mappedKeys = Array.from(new Set(Object.values(row.keyMappings)));
+                  const keys = mappedKeys.length > 0 ? mappedKeys : Object.keys(loadedValues);
+                  const revealed = revealedByRowId[row.id] === true;
+                  const loading = loadingByRowId[row.id] === true;
+
+                  return (
+                    <TableRow
+                      key={row.id}
+                      className={row.muted ? "bg-muted/20 text-muted-foreground hover:bg-muted/20" : undefined}
+                    >
+                      <TableCell>
+                        <Badge variant={row.source === "project" ? "default" : "outline"}>
+                          {row.source === "project" ? "Project" : "Global"}
+                        </Badge>
+                      </TableCell>
+                      <TableCell>{row.name}</TableCell>
+                      <TableCell>{formatSecretProvider(row.provider)}</TableCell>
+                      <TableCell>
+                        <Badge variant={statusVariant(row.status)}>{row.status}</Badge>
+                      </TableCell>
+                      <TableCell className="mono text-xs">
+                        {keys.length > 0 ? keys.join(", ") : <span className="text-muted-foreground">none</span>}
+                      </TableCell>
+                      <TableCell className="mono text-xs">
+                        {keys.length === 0 ? (
+                          <span className="text-muted-foreground">No mapped keys</span>
+                        ) : (
+                          keys.map((key) => {
+                            const value = loadedValues[key] ?? "";
+                            return (
+                              <div key={key}>
+                                {key}: {revealed ? value || "(empty)" : maskSecretValue(value)}
+                              </div>
+                            );
+                          })
+                        )}
+                      </TableCell>
+                      <TableCell className="mono text-xs">{row.k8sSecretName}</TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-2">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            disabled={loading}
+                            onClick={() => {
+                              void toggleRowVisibility(row);
+                            }}
+                          >
+                            {loading ? "Loading..." : revealed ? "Hide" : "Show"}
+                          </Button>
+                          {row.source === "project" ? (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              onClick={() => {
+                                void beginEdit(row);
+                              }}
+                            >
+                              Edit
+                            </Button>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">Global</span>
+                          )}
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
               </TableBody>
             </Table>
             {effectiveRows.length === 0 ? (

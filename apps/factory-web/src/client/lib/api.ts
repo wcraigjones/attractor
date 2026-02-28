@@ -2,6 +2,8 @@ import type {
   Artifact,
   ArtifactContentResponse,
   AttractorDef,
+  AttractorValidation,
+  AttractorVersion,
   Environment,
   EnvironmentShellSession,
   EnvironmentShellSessionRequest,
@@ -299,6 +301,11 @@ export async function listGlobalSecrets(): Promise<GlobalSecret[]> {
   return payload.secrets;
 }
 
+export async function getGlobalSecretValues(secretId: string): Promise<Record<string, string>> {
+  const payload = await apiRequest<{ values: Record<string, string> }>(`/api/secrets/global/${secretId}/values`);
+  return payload.values;
+}
+
 export async function upsertGlobalSecret(input: {
   name: string;
   provider?: string;
@@ -314,6 +321,13 @@ export async function upsertGlobalSecret(input: {
 export async function listProjectSecrets(projectId: string): Promise<ProjectSecret[]> {
   const payload = await apiRequest<{ secrets: ProjectSecret[] }>(`/api/projects/${projectId}/secrets`);
   return payload.secrets;
+}
+
+export async function getProjectSecretValues(projectId: string, secretId: string): Promise<Record<string, string>> {
+  const payload = await apiRequest<{ values: Record<string, string> }>(
+    `/api/projects/${projectId}/secrets/${secretId}/values`
+  );
+  return payload.values;
 }
 
 export async function upsertProjectSecret(
@@ -341,6 +355,28 @@ export async function listGlobalAttractors(): Promise<GlobalAttractor[]> {
   return payload.attractors;
 }
 
+export async function getGlobalAttractor(
+  attractorId: string
+): Promise<{ attractor: GlobalAttractor; content: string | null; validation: AttractorValidation }> {
+  return apiRequest<{ attractor: GlobalAttractor; content: string | null; validation: AttractorValidation }>(
+    `/api/attractors/global/${attractorId}`
+  );
+}
+
+export async function listGlobalAttractorVersions(attractorId: string): Promise<AttractorVersion[]> {
+  const payload = await apiRequest<{ versions: AttractorVersion[] }>(`/api/attractors/global/${attractorId}/versions`);
+  return payload.versions;
+}
+
+export async function getGlobalAttractorVersion(
+  attractorId: string,
+  version: number
+): Promise<{ version: AttractorVersion; content: string | null; validation: AttractorValidation }> {
+  return apiRequest<{ version: AttractorVersion; content: string | null; validation: AttractorValidation }>(
+    `/api/attractors/global/${attractorId}/versions/${version}`
+  );
+}
+
 export async function upsertGlobalAttractor(input: {
   name: string;
   content: string;
@@ -353,6 +389,27 @@ export async function upsertGlobalAttractor(input: {
     method: "POST",
     body: JSON.stringify(input)
   });
+}
+
+export async function updateGlobalAttractor(
+  attractorId: string,
+  input: {
+    expectedContentVersion?: number;
+    name?: string;
+    content?: string;
+    repoPath?: string | null;
+    defaultRunType?: "planning" | "implementation" | "task";
+    description?: string | null;
+    active?: boolean;
+  }
+): Promise<{ attractor: GlobalAttractor; content: string | null; validation: AttractorValidation }> {
+  return apiRequest<{ attractor: GlobalAttractor; content: string | null; validation: AttractorValidation }>(
+    `/api/attractors/global/${attractorId}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(input)
+    }
+  );
 }
 
 export async function createAttractor(
@@ -370,6 +427,57 @@ export async function createAttractor(
     method: "POST",
     body: JSON.stringify(input)
   });
+}
+
+export async function getProjectAttractor(
+  projectId: string,
+  attractorId: string
+): Promise<{ attractor: AttractorDef; content: string | null; validation: AttractorValidation }> {
+  return apiRequest<{ attractor: AttractorDef; content: string | null; validation: AttractorValidation }>(
+    `/api/projects/${projectId}/attractors/${attractorId}`
+  );
+}
+
+export async function listProjectAttractorVersions(
+  projectId: string,
+  attractorId: string
+): Promise<AttractorVersion[]> {
+  const payload = await apiRequest<{ versions: AttractorVersion[] }>(
+    `/api/projects/${projectId}/attractors/${attractorId}/versions`
+  );
+  return payload.versions;
+}
+
+export async function getProjectAttractorVersion(
+  projectId: string,
+  attractorId: string,
+  version: number
+): Promise<{ version: AttractorVersion; content: string | null; validation: AttractorValidation }> {
+  return apiRequest<{ version: AttractorVersion; content: string | null; validation: AttractorValidation }>(
+    `/api/projects/${projectId}/attractors/${attractorId}/versions/${version}`
+  );
+}
+
+export async function updateProjectAttractor(
+  projectId: string,
+  attractorId: string,
+  input: {
+    expectedContentVersion?: number;
+    name?: string;
+    content?: string;
+    repoPath?: string | null;
+    defaultRunType?: "planning" | "implementation" | "task";
+    description?: string | null;
+    active?: boolean;
+  }
+): Promise<{ attractor: AttractorDef; content: string | null; validation: AttractorValidation }> {
+  return apiRequest<{ attractor: AttractorDef; content: string | null; validation: AttractorValidation }>(
+    `/api/projects/${projectId}/attractors/${attractorId}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(input)
+    }
+  );
 }
 
 export async function listProjectRuns(projectId: string): Promise<Run[]> {
