@@ -103,6 +103,8 @@ const GLOBAL_SECRET_NAMESPACE =
   process.env.GLOBAL_SECRET_NAMESPACE ?? process.env.FACTORY_SYSTEM_NAMESPACE ?? "factory-system";
 const MINIO_BUCKET = process.env.MINIO_BUCKET ?? "factory-artifacts";
 const githubSyncConfig = githubSyncConfigFromEnv(process.env);
+const GITHUB_APP_GLOBAL_SECRET_NAME = process.env.GITHUB_APP_GLOBAL_SECRET_NAME ?? "github-app";
+const GITHUB_APP_MANIFEST_URL = "https://github.com/settings/apps/new";
 const digestPinnedImagePattern = /@sha256:[a-f0-9]{64}$/;
 const environmentResourcesSchema = z.object({
   requests: z
@@ -768,16 +770,251 @@ async function appendRunEvent(runId: string, type: string, payload: unknown): Pr
   );
 }
 
-function githubApp(): GitHubApp | null {
-  const appId = process.env.GITHUB_APP_ID;
-  const privateKey = process.env.GITHUB_APP_PRIVATE_KEY;
+interface GitHubAppCredentials {
+  appId: string;
+  privateKey: string;
+  appSlug: string | null;
+  webhookSecret: string | null;
+  source: "env" | "global-secret";
+}
+
+function readMappedSecretValue(
+  keyMappings: Record<string, string>,
+  values: Record<string, string>,
+  logicalKey: string
+): string {
+  const mapped = keyMappings[logicalKey] ?? logicalKey;
+  return String(values[mapped] ?? "").trim();
+}
+
+async function loadGitHubAppCredentialsFromGlobalSecret(): Promise<GitHubAppCredentials | null> {
+  const byName = await prisma.globalSecret.findUnique({
+    where: { name: GITHUB_APP_GLOBAL_SECRET_NAME }
+  });
+  const fallback =
+    byName ??
+    (await prisma.globalSecret.findFirst({
+      where: { provider: "github-app" },
+      orderBy: { updatedAt: "desc" }
+    }));
+  if (!fallback) {
+    return null;
+  }
+
+  let values: Record<string, string>;
+  try {
+    values = await readSecretValues(GLOBAL_SECRET_NAMESPACE, fallback.k8sSecretName);
+  } catch {
+    return null;
+  }
+
+  const keyMappings = (fallback.keyMappings ?? {}) as Record<string, string>;
+  const appId = readMappedSecretValue(keyMappings, values, "appId");
+  const privateKey = readMappedSecretValue(keyMappings, values, "privateKey");
   if (!appId || !privateKey) {
     return null;
   }
 
-  return new GitHubApp({
+  const appSlug = readMappedSecretValue(keyMappings, values, "appSlug") || null;
+  const webhookSecret = readMappedSecretValue(keyMappings, values, "webhookSecret") || null;
+
+  return {
     appId,
-    privateKey: privateKey.replace(/\\n/g, "\n")
+    privateKey,
+    appSlug,
+    webhookSecret,
+    source: "global-secret"
+  };
+}
+
+async function resolveGitHubAppCredentials(): Promise<GitHubAppCredentials | null> {
+  const envAppId = process.env.GITHUB_APP_ID?.trim() ?? "";
+  const envPrivateKey = process.env.GITHUB_APP_PRIVATE_KEY?.trim() ?? "";
+  if (envAppId && envPrivateKey) {
+    return {
+      appId: envAppId,
+      privateKey: envPrivateKey,
+      appSlug: process.env.GITHUB_APP_SLUG?.trim() || null,
+      webhookSecret: process.env.GITHUB_WEBHOOK_SECRET?.trim() || null,
+      source: "env"
+    };
+  }
+
+  return loadGitHubAppCredentialsFromGlobalSecret();
+}
+
+async function resolveGitHubWebhookSecret(): Promise<string | null> {
+  const envSecret = process.env.GITHUB_WEBHOOK_SECRET?.trim() ?? "";
+  if (envSecret) {
+    return envSecret;
+  }
+  const credentials = await resolveGitHubAppCredentials();
+  return credentials?.webhookSecret ?? null;
+}
+
+async function isGitHubSyncEnabled(): Promise<boolean> {
+  const explicit = process.env.GITHUB_SYNC_ENABLED?.trim().toLowerCase();
+  if (explicit === "true") {
+    return true;
+  }
+  if (explicit === "false") {
+    return false;
+  }
+  return (await resolveGitHubAppCredentials()) !== null;
+}
+
+async function githubApp(): Promise<GitHubApp | null> {
+  const credentials = await resolveGitHubAppCredentials();
+  if (!credentials) {
+    return null;
+  }
+  return new GitHubApp({
+    appId: credentials.appId,
+    privateKey: credentials.privateKey.replace(/\\n/g, "\n")
+  });
+}
+
+function requestOrigin(req: express.Request): string {
+  const forwardedProto = req.header("x-forwarded-proto")?.split(",")[0]?.trim();
+  const forwardedHost = req.header("x-forwarded-host")?.split(",")[0]?.trim();
+  if (forwardedProto && forwardedHost) {
+    return `${forwardedProto}://${forwardedHost}`;
+  }
+  const host = req.get("host");
+  if (!host) {
+    return "";
+  }
+  return `${req.protocol}://${host}`;
+}
+
+function parseGitHubProjectState(value: string | null | undefined): string {
+  const raw = String(value ?? "").trim();
+  if (!raw || raw === "none") {
+    return "";
+  }
+
+  if (raw.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(raw) as { projectId?: unknown };
+      if (typeof parsed.projectId === "string") {
+        return parsed.projectId.trim();
+      }
+    } catch {
+      return raw;
+    }
+  }
+
+  try {
+    const decoded = Buffer.from(raw, "base64url").toString("utf8");
+    const parsed = JSON.parse(decoded) as { projectId?: unknown };
+    if (typeof parsed.projectId === "string" && parsed.projectId.trim().length > 0) {
+      return parsed.projectId.trim();
+    }
+  } catch {
+    // Ignore non-encoded state.
+  }
+
+  return raw;
+}
+
+function buildProjectRedirectUrl(
+  projectId: string,
+  params?: Record<string, string | null | undefined>
+): string {
+  const basePath = `/projects/${encodeURIComponent(projectId)}`;
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params ?? {})) {
+    const normalized = String(value ?? "").trim();
+    if (normalized.length > 0) {
+      query.set(key, normalized);
+    }
+  }
+  const path = query.toString().length > 0 ? `${basePath}?${query.toString()}` : basePath;
+  const webBase = process.env.FACTORY_WEB_BASE_URL?.trim().replace(/\/+$/, "");
+  return webBase ? `${webBase}${path}` : path;
+}
+
+async function convertGitHubManifestCode(code: string): Promise<{
+  appId: string;
+  appSlug: string;
+  privateKey: string;
+  webhookSecret: string | null;
+}> {
+  const response = await fetch(`https://api.github.com/app-manifests/${encodeURIComponent(code)}/conversions`, {
+    method: "POST",
+    headers: {
+      accept: "application/vnd.github+json",
+      "user-agent": "attractor-factory-api"
+    }
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(
+      `GitHub manifest conversion failed: ${response.status} ${response.statusText} ${body.slice(0, 300)}`
+    );
+  }
+
+  const payload = (await response.json()) as {
+    id?: number | string;
+    slug?: string;
+    pem?: string;
+    webhook_secret?: string | null;
+  };
+  const appId = String(payload.id ?? "").trim();
+  const appSlug = String(payload.slug ?? "").trim();
+  const privateKey = String(payload.pem ?? "").trim();
+  if (!appId || !appSlug || !privateKey) {
+    throw new Error("GitHub manifest conversion response is missing app credentials");
+  }
+
+  return {
+    appId,
+    appSlug,
+    privateKey,
+    webhookSecret: payload.webhook_secret?.trim() || null
+  };
+}
+
+async function upsertGitHubAppGlobalSecret(input: {
+  appId: string;
+  appSlug: string;
+  privateKey: string;
+  webhookSecret: string | null;
+}): Promise<void> {
+  const secretName = toSecretName("factory-global", GITHUB_APP_GLOBAL_SECRET_NAME);
+  const values: Record<string, string> = {
+    app_id: input.appId,
+    app_slug: input.appSlug,
+    private_key: input.privateKey
+  };
+  if (input.webhookSecret?.trim()) {
+    values.webhook_secret = input.webhookSecret.trim();
+  }
+
+  const keyMappings: Record<string, string> = {
+    appId: "app_id",
+    appSlug: "app_slug",
+    privateKey: "private_key",
+    ...(values.webhook_secret ? { webhookSecret: "webhook_secret" } : {})
+  };
+
+  await upsertSecret(GLOBAL_SECRET_NAMESPACE, secretName, values);
+  await propagateGlobalSecretToAllProjects(secretName, values);
+
+  await prisma.globalSecret.upsert({
+    where: { name: GITHUB_APP_GLOBAL_SECRET_NAME },
+    update: {
+      provider: "github-app",
+      k8sSecretName: secretName,
+      keyMappings: keyMappings as never
+    },
+    create: {
+      name: GITHUB_APP_GLOBAL_SECRET_NAME,
+      provider: "github-app",
+      k8sSecretName: secretName,
+      keyMappings: keyMappings as never
+    }
   });
 }
 
@@ -966,7 +1203,7 @@ async function upsertGitHubPullRequestForProject(input: {
 }
 
 async function getInstallationOctokit(installationId: string) {
-  const app = githubApp();
+  const app = await githubApp();
   if (!app) {
     throw new Error("GitHub App credentials are not configured");
   }
@@ -984,7 +1221,7 @@ async function reconcileProjectGitHub(projectId: string): Promise<{
   if (!project) {
     throw new Error("project not found");
   }
-  if (!githubSyncConfig.enabled) {
+  if (!(await isGitHubSyncEnabled())) {
     throw new Error("GitHub sync is disabled");
   }
   if (!project.githubInstallationId || !project.repoFullName) {
@@ -3465,8 +3702,12 @@ app.post("/api/runs/:runId/cancel", async (req, res) => {
 });
 
 app.post("/api/github/webhooks", express.raw({ type: "*/*" }), async (req, res) => {
-  if (!githubSyncConfig.enabled) {
+  if (!(await isGitHubSyncEnabled())) {
     return sendError(res, 503, "GitHub sync is disabled");
+  }
+  const webhookSecret = await resolveGitHubWebhookSecret();
+  if (!webhookSecret) {
+    return sendError(res, 503, "GitHub webhook secret is not configured");
   }
 
   const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from(String(req.body ?? ""), "utf8");
@@ -3474,7 +3715,7 @@ app.post("/api/github/webhooks", express.raw({ type: "*/*" }), async (req, res) 
   const valid = verifyGitHubWebhookSignature({
     rawBody,
     signatureHeader: signature,
-    secret: githubSyncConfig.webhookSecret
+    secret: webhookSecret
   });
   if (!valid) {
     return sendError(res, 401, "invalid webhook signature");
@@ -3817,24 +4058,110 @@ app.get("/api/projects/:projectId/github/pulls/:prNumber", async (req, res) => {
   });
 });
 
-app.get("/api/github/app/start", (req, res) => {
-  const slug = process.env.GITHUB_APP_SLUG;
-  if (!slug) {
-    return sendError(res, 500, "GITHUB_APP_SLUG is not configured");
+app.get("/api/github/app/status", async (_req, res) => {
+  const credentials = await resolveGitHubAppCredentials();
+  const webhookSecret = await resolveGitHubWebhookSecret();
+  res.json({
+    configured: !!credentials,
+    source: credentials?.source ?? "none",
+    appId: credentials?.appId ?? null,
+    appSlug: credentials?.appSlug ?? null,
+    hasWebhookSecret: !!webhookSecret,
+    syncEnabled: await isGitHubSyncEnabled()
+  });
+});
+
+app.get("/api/github/app/manifest/start", async (req, res) => {
+  const projectId = String(req.query.projectId ?? "").trim();
+  if (!projectId) {
+    return sendError(res, 400, "projectId is required");
   }
 
-  const projectId = String(req.query.projectId ?? "");
+  const project = await prisma.project.findUnique({ where: { id: projectId } });
+  if (!project) {
+    return sendError(res, 404, "project not found");
+  }
+
+  const origin = requestOrigin(req);
+  if (!origin) {
+    return sendError(res, 400, "unable to resolve public origin");
+  }
+
+  const callbackUrl = `${origin}/api/github/app/callback`;
+  const webhookUrl = `${origin}/api/github/webhooks`;
+  const projectUrl = `${origin}/projects/${encodeURIComponent(project.id)}`;
+  const appNameBase = `Attractor ${project.name}`.trim();
+  const appName = appNameBase.slice(0, 34) || "Attractor Factory";
+
+  res.json({
+    manifestUrl: GITHUB_APP_MANIFEST_URL,
+    state: project.id,
+    manifest: {
+      name: appName,
+      url: projectUrl,
+      hook_attributes: {
+        url: webhookUrl
+      },
+      redirect_url: callbackUrl,
+      callback_urls: [callbackUrl],
+      public: false,
+      default_permissions: {
+        metadata: "read",
+        contents: "write",
+        issues: "read",
+        pull_requests: "write",
+        checks: "write"
+      },
+      default_events: ["issues", "pull_request"]
+    }
+  });
+});
+
+app.get("/api/github/app/start", async (req, res) => {
+  const projectId = String(req.query.projectId ?? "").trim();
+  const credentials = await resolveGitHubAppCredentials();
+  const slug = credentials?.appSlug ?? process.env.GITHUB_APP_SLUG?.trim() ?? "";
+  if (!slug) {
+    return sendError(
+      res,
+      409,
+      "GitHub App slug is not configured. Create the app first via /api/github/app/manifest/start"
+    );
+  }
+
   const state = encodeURIComponent(projectId || "none");
   const installationUrl = `https://github.com/apps/${slug}/installations/new?state=${state}`;
-  res.json({ installationUrl });
+  res.json({ installationUrl, appSlug: slug });
 });
 
 app.get("/api/github/app/callback", async (req, res) => {
-  const installationId = String(req.query.installation_id ?? "");
-  const projectId = String(req.query.state ?? "");
+  const installationId = String(req.query.installation_id ?? "").trim();
+  const projectId = parseGitHubProjectState(String(req.query.state ?? ""));
+  const code = String(req.query.code ?? "").trim();
+
+  if (code) {
+    if (!projectId) {
+      return sendError(res, 400, "state(projectId) is required for app manifest conversion");
+    }
+
+    try {
+      const conversion = await convertGitHubManifestCode(code);
+      await upsertGitHubAppGlobalSecret(conversion);
+      const installationUrl = `https://github.com/apps/${conversion.appSlug}/installations/new?state=${encodeURIComponent(projectId)}`;
+      return res.redirect(302, installationUrl);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return res.redirect(302, buildProjectRedirectUrl(projectId, { githubAppError: message }));
+    }
+  }
 
   if (!installationId || !projectId) {
-    return sendError(res, 400, "installation_id and state(projectId) are required");
+    return sendError(res, 400, "code or installation_id + state(projectId) are required");
+  }
+
+  const project = await prisma.project.findUnique({ where: { id: projectId } });
+  if (!project) {
+    return sendError(res, 404, "project not found");
   }
 
   await prisma.project.update({
@@ -3844,7 +4171,13 @@ app.get("/api/github/app/callback", async (req, res) => {
     }
   });
 
-  res.json({ projectId, installationId, linked: true });
+  return res.redirect(
+    302,
+    buildProjectRedirectUrl(project.id, {
+      githubLinked: "1",
+      installationId
+    })
+  );
 });
 
 app.get("/api/projects/:projectId/github/repos", async (req, res) => {
@@ -3853,21 +4186,22 @@ app.get("/api/projects/:projectId/github/repos", async (req, res) => {
     return sendError(res, 404, "project/github installation not found");
   }
 
-  const ghApp = githubApp();
-  if (!ghApp) {
-    return sendError(res, 500, "GitHub App credentials are not configured");
+  try {
+    const octokit = await getInstallationOctokit(project.githubInstallationId);
+    const response = await octokit.request("GET /installation/repositories");
+    const repos = response.data.repositories
+      .map((repo: { id: number; full_name: string; default_branch: string; private: boolean }) => ({
+        id: repo.id,
+        fullName: repo.full_name,
+        defaultBranch: repo.default_branch,
+        private: repo.private
+      }))
+      .sort((a, b) => a.fullName.localeCompare(b.fullName));
+
+    res.json({ repos, installationId: project.githubInstallationId });
+  } catch (error) {
+    return sendError(res, 400, error instanceof Error ? error.message : String(error));
   }
-
-  const octokit = await ghApp.getInstallationOctokit(Number(project.githubInstallationId));
-  const response = await octokit.request("GET /installation/repositories");
-  const repos = response.data.repositories.map((repo: { id: number; full_name: string; default_branch: string; private: boolean }) => ({
-    id: repo.id,
-    fullName: repo.full_name,
-    defaultBranch: repo.default_branch,
-    private: repo.private
-  }));
-
-  res.json({ repos });
 });
 
 app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
@@ -3877,11 +4211,14 @@ app.use((err: unknown, _req: express.Request, res: express.Response, _next: expr
 
 let reconcileLoopActive = false;
 function startGitHubReconcileLoop() {
-  if (!githubSyncConfig.enabled) {
-    process.stdout.write("github sync scheduler disabled\n");
+  const explicit = process.env.GITHUB_SYNC_ENABLED?.trim().toLowerCase();
+  if (explicit === "false") {
+    process.stdout.write("github sync scheduler disabled (GITHUB_SYNC_ENABLED=false)\n");
     return;
   }
+
   const intervalMs = githubSyncConfig.reconcileIntervalMinutes * 60 * 1000;
+  process.stdout.write(`github sync scheduler interval ${githubSyncConfig.reconcileIntervalMinutes}m\n`);
   setInterval(() => {
     if (reconcileLoopActive) {
       return;
@@ -3889,6 +4226,9 @@ function startGitHubReconcileLoop() {
     reconcileLoopActive = true;
     void (async () => {
       try {
+        if (!(await isGitHubSyncEnabled())) {
+          return;
+        }
         const projects = await prisma.project.findMany({
           where: {
             githubInstallationId: { not: null },

@@ -56,6 +56,16 @@ const providerSpecs: Record<string, ProviderEnvSpec> = {
     },
     requiredAll: ["googleCloudProject", "googleCloudLocation"]
   },
+  "github-app": {
+    envByLogicalKey: {
+      appId: "GITHUB_APP_ID",
+      privateKey: "GITHUB_APP_PRIVATE_KEY",
+      appSlug: "GITHUB_APP_SLUG",
+      webhookSecret: "GITHUB_WEBHOOK_SECRET",
+      token: "GITHUB_TOKEN"
+    },
+    requiredAll: ["appId", "privateKey"]
+  },
   groq: {
     envByLogicalKey: { apiKey: "GROQ_API_KEY" },
     requiredAll: ["apiKey"]

@@ -42,6 +42,11 @@ describe("shared k8s helpers", () => {
     expect(anthropic).toBeTruthy();
     expect(anthropic?.requiredAny).toContain("apiKey");
     expect(anthropic?.envByLogicalKey.oauthToken).toBe("ANTHROPIC_OAUTH_TOKEN");
+
+    const githubApp = getProviderSecretSchema("github-app");
+    expect(githubApp).toBeTruthy();
+    expect(githubApp?.requiredAll).toEqual(["appId", "privateKey"]);
+    expect(githubApp?.envByLogicalKey.appId).toBe("GITHUB_APP_ID");
   });
 
   it("adds minio credentials and execution spec to runner job", () => {

@@ -6,7 +6,9 @@ import type {
   AttractorVersion,
   Environment,
   EnvironmentResources,
+  GitHubAppStatus,
   GitHubIssue,
+  GitHubInstallationRepo,
   GitHubPullQueueItem,
   GitHubPullRequest,
   GlobalAttractor,
@@ -75,6 +77,39 @@ export async function connectProjectRepo(
     method: "POST",
     body: JSON.stringify(input)
   });
+}
+
+export async function getGitHubAppStatus(): Promise<GitHubAppStatus> {
+  return apiRequest<GitHubAppStatus>("/api/github/app/status");
+}
+
+export async function startGitHubAppManifestSetup(projectId: string): Promise<{
+  manifestUrl: string;
+  state: string;
+  manifest: Record<string, unknown>;
+}> {
+  return apiRequest<{
+    manifestUrl: string;
+    state: string;
+    manifest: Record<string, unknown>;
+  }>(`/api/github/app/manifest/start?projectId=${encodeURIComponent(projectId)}`);
+}
+
+export async function startGitHubAppInstallation(projectId: string): Promise<{
+  installationUrl: string;
+  appSlug: string;
+}> {
+  return apiRequest<{ installationUrl: string; appSlug: string }>(
+    `/api/github/app/start?projectId=${encodeURIComponent(projectId)}`
+  );
+}
+
+export async function listGitHubInstallationRepos(
+  projectId: string
+): Promise<{ repos: GitHubInstallationRepo[]; installationId: string }> {
+  return apiRequest<{ repos: GitHubInstallationRepo[]; installationId: string }>(
+    `/api/projects/${projectId}/github/repos`
+  );
 }
 
 export async function reconcileProjectGitHub(

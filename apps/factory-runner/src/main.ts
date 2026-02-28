@@ -576,12 +576,48 @@ async function getObjectString(key: string): Promise<string> {
   throw new Error("Unsupported S3 body stream implementation");
 }
 
-function gitRemote(repoFullName: string): string {
-  const token = process.env.GITHUB_TOKEN;
+function gitRemote(repoFullName: string, token?: string | null): string {
   if (!token) {
     return `https://github.com/${repoFullName}.git`;
   }
   return `https://x-access-token:${token}@github.com/${repoFullName}.git`;
+}
+
+async function githubGitToken(installationId?: string): Promise<string | null> {
+  const staticToken = process.env.GITHUB_TOKEN?.trim() ?? "";
+  if (staticToken) {
+    return staticToken;
+  }
+  if (!installationId) {
+    return null;
+  }
+
+  const app = githubApp();
+  if (!app) {
+    return null;
+  }
+
+  try {
+    const octokit = await app.getInstallationOctokit(Number(installationId));
+    const auth = (await octokit.auth({ type: "installation" } as never)) as
+      | string
+      | { token?: unknown }
+      | null
+      | undefined;
+    if (typeof auth === "string") {
+      const token = auth.trim();
+      return token.length > 0 ? token : null;
+    }
+    const token = String(auth?.token ?? "").trim();
+    return token.length > 0 ? token : null;
+  } catch (error) {
+    process.stderr.write(
+      `failed to resolve installation token for ${installationId}: ${
+        error instanceof Error ? error.message : String(error)
+      }\n`
+    );
+    return null;
+  }
 }
 
 async function runCommand(command: string, args: string[], cwd: string): Promise<string> {
@@ -602,9 +638,19 @@ async function hasStagedChanges(cwd: string): Promise<boolean> {
   }
 }
 
-async function checkoutRepository(runId: string, repoFullName: string, sourceBranch: string): Promise<string> {
+async function checkoutRepository(
+  runId: string,
+  repoFullName: string,
+  sourceBranch: string,
+  installationId?: string
+): Promise<string> {
   const workDir = mkdtempSync(join(tmpdir(), `factory-run-${runId}-`));
-  await runCommand("git", ["clone", "--depth", "1", "--branch", sourceBranch, gitRemote(repoFullName), workDir], tmpdir());
+  const token = await githubGitToken(installationId);
+  await runCommand(
+    "git",
+    ["clone", "--depth", "1", "--branch", sourceBranch, gitRemote(repoFullName, token), workDir],
+    tmpdir()
+  );
   return workDir;
 }
 
@@ -1956,7 +2002,12 @@ async function processRun(spec: RunExecutionSpec): Promise<void> {
   }
 
   await assertRunNotCanceled(run.id);
-  const workDir = await checkoutRepository(run.id, run.project.repoFullName, run.sourceBranch);
+  const workDir = await checkoutRepository(
+    run.id,
+    run.project.repoFullName,
+    run.sourceBranch,
+    run.project.githubInstallationId ?? undefined
+  );
 
   try {
     const attractorResolved = await loadAttractorContent({

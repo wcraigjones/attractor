@@ -48,6 +48,22 @@ export interface Project {
   updatedAt: string;
 }
 
+export interface GitHubAppStatus {
+  configured: boolean;
+  source: "env" | "global-secret" | "none";
+  appId: string | null;
+  appSlug: string | null;
+  hasWebhookSecret: boolean;
+  syncEnabled: boolean;
+}
+
+export interface GitHubInstallationRepo {
+  id: number;
+  fullName: string;
+  defaultBranch: string;
+  private: boolean;
+}
+
 export interface ProjectSecret {
   id: string;
   projectId: string;

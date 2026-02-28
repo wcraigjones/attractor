@@ -188,7 +188,12 @@ Implemented endpoints:
 - `GET /api/projects`
 - `POST /api/projects/{projectId}/environment`
 - `POST /api/bootstrap/self`
+- `GET /api/github/app/status`
+- `GET /api/github/app/manifest/start?projectId=<projectId>`
+- `GET /api/github/app/start?projectId=<projectId>`
+- `GET /api/github/app/callback`
 - `POST /api/projects/{projectId}/repo/connect/github`
+- `GET /api/projects/{projectId}/github/repos`
 - `POST /api/github/webhooks`
 - `POST /api/projects/{projectId}/github/reconcile`
 - `GET /api/projects/{projectId}/github/issues`

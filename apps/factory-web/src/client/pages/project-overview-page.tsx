@@ -1,16 +1,20 @@
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import {
   connectProjectRepo,
-  listEnvironments,
+  getGitHubAppStatus,
   listAttractors,
+  listEnvironments,
+  listGitHubInstallationRepos,
   listProjectRuns,
   listProjects,
   listProjectSecrets,
-  setProjectDefaultEnvironment
+  setProjectDefaultEnvironment,
+  startGitHubAppInstallation,
+  startGitHubAppManifestSetup
 } from "../lib/api";
 import { buildEffectiveAttractors } from "../lib/attractors-view";
 import { PageTitle } from "../components/layout/page-title";
@@ -20,17 +24,46 @@ import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 
+function submitGitHubManifestForm(input: {
+  manifestUrl: string;
+  state: string;
+  manifest: Record<string, unknown>;
+}): void {
+  const form = document.createElement("form");
+  form.method = "POST";
+  form.action = input.manifestUrl;
+  form.style.display = "none";
+
+  const manifestField = document.createElement("input");
+  manifestField.type = "hidden";
+  manifestField.name = "manifest";
+  manifestField.value = JSON.stringify(input.manifest);
+  form.appendChild(manifestField);
+
+  const stateField = document.createElement("input");
+  stateField.type = "hidden";
+  stateField.name = "state";
+  stateField.value = input.state;
+  form.appendChild(stateField);
+
+  document.body.appendChild(form);
+  form.submit();
+}
+
 export function ProjectOverviewPage() {
   const params = useParams<{ projectId: string }>();
   const projectId = params.projectId ?? "";
+  const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
 
   const [installationId, setInstallationId] = useState("");
   const [repoFullName, setRepoFullName] = useState("");
   const [defaultBranch, setDefaultBranch] = useState("main");
+  const [selectedRepoFullName, setSelectedRepoFullName] = useState("");
   const [selectedDefaultEnvironmentId, setSelectedDefaultEnvironmentId] = useState("");
 
   const projectsQuery = useQuery({ queryKey: ["projects"], queryFn: listProjects });
+  const githubAppStatusQuery = useQuery({ queryKey: ["github-app-status"], queryFn: getGitHubAppStatus });
   const runsQuery = useQuery({
     queryKey: ["project-runs", projectId],
     queryFn: () => listProjectRuns(projectId),
@@ -55,10 +88,18 @@ export function ProjectOverviewPage() {
     () => projectsQuery.data?.find((candidate) => candidate.id === projectId),
     [projectsQuery.data, projectId]
   );
+
+  const reposQuery = useQuery({
+    queryKey: ["github-installation-repos", projectId],
+    queryFn: () => listGitHubInstallationRepos(projectId),
+    enabled: projectId.length > 0 && !!project?.githubInstallationId
+  });
+
   const effectiveAttractorCount = useMemo(
     () => buildEffectiveAttractors(attractorsQuery.data ?? []).length,
     [attractorsQuery.data]
   );
+  const installationRepos = reposQuery.data?.repos ?? [];
 
   const connectMutation = useMutation({
     mutationFn: (input: { installationId: string; repoFullName: string; defaultBranch: string }) =>
@@ -66,11 +107,33 @@ export function ProjectOverviewPage() {
     onSuccess: () => {
       toast.success("Repository connection saved");
       void queryClient.invalidateQueries({ queryKey: ["projects"] });
+      void queryClient.invalidateQueries({ queryKey: ["github-installation-repos", projectId] });
     },
     onError: (error) => {
       toast.error(error instanceof Error ? error.message : String(error));
     }
   });
+
+  const createAppMutation = useMutation({
+    mutationFn: () => startGitHubAppManifestSetup(projectId),
+    onSuccess: (payload) => {
+      submitGitHubManifestForm(payload);
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : String(error));
+    }
+  });
+
+  const installAppMutation = useMutation({
+    mutationFn: () => startGitHubAppInstallation(projectId),
+    onSuccess: (payload) => {
+      window.location.assign(payload.installationUrl);
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : String(error));
+    }
+  });
+
   const setDefaultEnvironmentMutation = useMutation({
     mutationFn: (environmentId: string) => setProjectDefaultEnvironment(projectId, environmentId),
     onSuccess: () => {
@@ -88,6 +151,50 @@ export function ProjectOverviewPage() {
   const defaultEnvironment = (environmentsQuery.data ?? []).find(
     (environment) => environment.id === project?.defaultEnvironmentId
   );
+
+  useEffect(() => {
+    if (!project) {
+      return;
+    }
+    if (!installationId && project.githubInstallationId) {
+      setInstallationId(project.githubInstallationId);
+    }
+    if (!repoFullName && project.repoFullName) {
+      setRepoFullName(project.repoFullName);
+      setSelectedRepoFullName(project.repoFullName);
+    }
+    if ((defaultBranch === "main" || !defaultBranch) && project.defaultBranch) {
+      setDefaultBranch(project.defaultBranch);
+    }
+  }, [project, installationId, repoFullName, defaultBranch]);
+
+  useEffect(() => {
+    const linked = searchParams.get("githubLinked");
+    const error = searchParams.get("githubAppError");
+    const callbackInstallationId = searchParams.get("installationId");
+
+    if (!linked && !error && !callbackInstallationId) {
+      return;
+    }
+
+    if (callbackInstallationId?.trim()) {
+      setInstallationId(callbackInstallationId.trim());
+    }
+    if (linked === "1") {
+      toast.success("GitHub App installation linked");
+      void queryClient.invalidateQueries({ queryKey: ["projects"] });
+      void queryClient.invalidateQueries({ queryKey: ["github-installation-repos", projectId] });
+    }
+    if (error) {
+      toast.error(error);
+    }
+
+    const cleaned = new URLSearchParams(searchParams);
+    cleaned.delete("githubLinked");
+    cleaned.delete("githubAppError");
+    cleaned.delete("installationId");
+    setSearchParams(cleaned, { replace: true });
+  }, [projectId, queryClient, searchParams, setSearchParams]);
 
   if (!project) {
     return <p className="text-sm text-muted-foreground">Project not found.</p>;
@@ -136,24 +243,89 @@ export function ProjectOverviewPage() {
         <Card>
           <CardHeader>
             <CardTitle>Repository Connection</CardTitle>
-            <CardDescription>GitHub App installation metadata for branch + PR operations.</CardDescription>
+            <CardDescription>Create/install a GitHub App, then connect a repository for this project.</CardDescription>
           </CardHeader>
-          <CardContent>
+          <CardContent className="space-y-4">
+            <div className="rounded-md border border-border p-3">
+              <p className="text-sm">
+                <span className="text-muted-foreground">GitHub App:</span>{" "}
+                {githubAppStatusQuery.data?.configured
+                  ? `configured (${githubAppStatusQuery.data.source})`
+                  : "not configured"}
+              </p>
+              <p className="text-sm">
+                <span className="text-muted-foreground">Installation:</span> {project.githubInstallationId ?? "not linked"}
+              </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => createAppMutation.mutate()}
+                  disabled={createAppMutation.isPending}
+                >
+                  {createAppMutation.isPending ? "Opening GitHub..." : "Create GitHub App"}
+                </Button>
+                <Button
+                  type="button"
+                  onClick={() => installAppMutation.mutate()}
+                  disabled={installAppMutation.isPending}
+                >
+                  {installAppMutation.isPending ? "Opening GitHub..." : "Install / Link App"}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => void queryClient.invalidateQueries({ queryKey: ["github-installation-repos", projectId] })}
+                  disabled={reposQuery.isFetching || !project.githubInstallationId}
+                >
+                  {reposQuery.isFetching ? "Refreshing..." : "Refresh Repositories"}
+                </Button>
+              </div>
+            </div>
+
             <form
               className="grid gap-3 md:grid-cols-2"
               onSubmit={(event) => {
                 event.preventDefault();
-                if (!installationId.trim() || !repoFullName.trim() || !defaultBranch.trim()) {
+                const effectiveInstallationId = installationId.trim() || project.githubInstallationId?.trim() || "";
+                if (!effectiveInstallationId || !repoFullName.trim() || !defaultBranch.trim()) {
                   toast.error("Installation ID, repository, and default branch are required");
                   return;
                 }
                 connectMutation.mutate({
-                  installationId: installationId.trim(),
+                  installationId: effectiveInstallationId,
                   repoFullName: repoFullName.trim(),
                   defaultBranch: defaultBranch.trim()
                 });
               }}
             >
+              {installationRepos.length > 0 ? (
+                <div className="space-y-1 md:col-span-2">
+                  <Label>Repository from Installation</Label>
+                  <Select
+                    value={selectedRepoFullName || undefined}
+                    onValueChange={(value) => {
+                      setSelectedRepoFullName(value);
+                      setRepoFullName(value);
+                      const selected = installationRepos.find((repo) => repo.fullName === value);
+                      if (selected?.defaultBranch) {
+                        setDefaultBranch(selected.defaultBranch);
+                      }
+                    }}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select repository" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {installationRepos.map((repo) => (
+                        <SelectItem key={repo.id} value={repo.fullName}>
+                          {repo.fullName}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              ) : null}
               <div className="space-y-1">
                 <Label htmlFor="installation-id">Installation ID</Label>
                 <Input
@@ -168,7 +340,10 @@ export function ProjectOverviewPage() {
                 <Input
                   id="repo-name"
                   value={repoFullName}
-                  onChange={(event) => setRepoFullName(event.target.value)}
+                  onChange={(event) => {
+                    setRepoFullName(event.target.value);
+                    setSelectedRepoFullName(event.target.value);
+                  }}
                   placeholder={project.repoFullName ?? "owner/repo"}
                 />
               </div>
@@ -204,6 +379,9 @@ export function ProjectOverviewPage() {
             </p>
             <p>
               <span className="text-muted-foreground">GitHub installation:</span> {project.githubInstallationId ?? "-"}
+            </p>
+            <p>
+              <span className="text-muted-foreground">GitHub App:</span> {githubAppStatusQuery.data?.appSlug ?? "Not configured"}
             </p>
             <p>
               <span className="text-muted-foreground">Environment:</span> {defaultEnvironment?.name ?? "-"}
