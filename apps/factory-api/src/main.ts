@@ -1,9 +1,10 @@
 import express from "express";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { join } from "node:path";
-import { Readable } from "node:stream";
-import { KubeConfig, CoreV1Api } from "@kubernetes/client-node";
+import { PassThrough, Readable, Writable } from "node:stream";
+import { KubeConfig, CoreV1Api, Exec } from "@kubernetes/client-node";
 import { App as GitHubApp } from "@octokit/app";
 import {
   AttractorScope,
@@ -16,6 +17,8 @@ import {
 } from "@prisma/client";
 import { Redis } from "ioredis";
 import { getModels, getProviders } from "@mariozechner/pi-ai";
+import { WebSocketServer, WebSocket } from "ws";
+import type { RawData } from "ws";
 import {
   CreateBucketCommand,
   GetObjectCommand,
@@ -95,6 +98,8 @@ const DEFAULT_ENVIRONMENT_NAME = process.env.DEFAULT_ENVIRONMENT_NAME ?? "defaul
 const GLOBAL_SECRET_NAMESPACE =
   process.env.GLOBAL_SECRET_NAMESPACE ?? process.env.FACTORY_SYSTEM_NAMESPACE ?? "factory-system";
 const MINIO_BUCKET = process.env.MINIO_BUCKET ?? "factory-artifacts";
+const SHELL_SESSION_TTL_SECONDS = Number(process.env.SHELL_SESSION_TTL_SECONDS ?? 1800);
+const SHELL_POD_READY_TIMEOUT_SECONDS = Number(process.env.SHELL_POD_READY_TIMEOUT_SECONDS ?? 90);
 const githubSyncConfig = githubSyncConfigFromEnv(process.env);
 const digestPinnedImagePattern = /@sha256:[a-f0-9]{64}$/;
 const environmentResourcesSchema = z.object({
@@ -111,6 +116,30 @@ const environmentResourcesSchema = z.object({
     })
     .optional()
 });
+const createEnvironmentShellSessionSchema = z.object({
+  mode: z.enum(["project", "system"]).default("project"),
+  projectId: z.string().min(1).optional(),
+  injectSecrets: z.boolean().optional()
+});
+
+type ShellSessionMode = "project" | "system";
+
+interface EnvironmentShellSession {
+  id: string;
+  environmentId: string;
+  mode: ShellSessionMode;
+  projectId: string | null;
+  namespace: string;
+  podName: string;
+  injectSecrets: boolean;
+  connected: boolean;
+  ttlTimer: ReturnType<typeof setTimeout>;
+  stdin?: PassThrough;
+  execSocket?: { close: () => void };
+  clientSocket?: WebSocket;
+}
+
+const environmentShellSessions = new Map<string, EnvironmentShellSession>();
 
 const minioClient = new S3Client({
   region: "us-east-1",
@@ -394,17 +423,22 @@ async function resolveRunEnvironment(input: {
   };
 }
 
-function getKubeApi(): CoreV1Api | null {
+function loadKubeConfig(): KubeConfig | null {
   if (process.env.K8S_ENABLED === "false") {
     return null;
   }
   try {
     const kc = new KubeConfig();
     kc.loadFromDefault();
-    return kc.makeApiClient(CoreV1Api);
+    return kc;
   } catch {
     return null;
   }
+}
+
+function getKubeApi(): CoreV1Api | null {
+  const kc = loadKubeConfig();
+  return kc ? kc.makeApiClient(CoreV1Api) : null;
 }
 
 async function ensureNamespace(name: string): Promise<void> {
@@ -577,6 +611,135 @@ async function hasEffectiveProviderSecret(projectId: string, provider: string): 
   ]);
 
   return !!projectSecret || !!globalSecret;
+}
+
+function waitMs(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+async function waitForPodRunning(input: {
+  kube: CoreV1Api;
+  namespace: string;
+  podName: string;
+  timeoutMs: number;
+}): Promise<void> {
+  const deadline = Date.now() + input.timeoutMs;
+  let lastReason = "pod not yet running";
+  while (Date.now() < deadline) {
+    const pod = await input.kube.readNamespacedPod({
+      name: input.podName,
+      namespace: input.namespace
+    });
+    const phase = pod.status?.phase ?? "Unknown";
+    if (phase === "Running") {
+      return;
+    }
+    if (phase === "Failed" || phase === "Unknown") {
+      lastReason = pod.status?.reason ?? `pod phase=${phase}`;
+      break;
+    }
+    lastReason = pod.status?.reason ?? `pod phase=${phase}`;
+    await waitMs(1000);
+  }
+  throw new Error(`shell pod did not become ready in time: ${lastReason}`);
+}
+
+async function resolveShellSecretEnv(input: {
+  mode: ShellSessionMode;
+  projectId?: string;
+  injectSecrets: boolean;
+}) {
+  if (!input.injectSecrets) {
+    return [];
+  }
+
+  const globalSecrets = await prisma.globalSecret.findMany();
+  const globalMappings = globalSecrets
+    .map((secret) => ({
+      provider: secret.provider,
+      secretName: secret.k8sSecretName,
+      keys: secret.keyMappings as Record<string, string>
+    }))
+    .filter((mapping) => getProviderSecretSchema(mapping.provider) !== null);
+
+  let mappings = globalMappings;
+  if (input.mode === "project" && input.projectId) {
+    const projectSecrets = await prisma.projectSecret.findMany({
+      where: { projectId: input.projectId }
+    });
+    const projectMappings = projectSecrets
+      .map((secret) => ({
+        provider: secret.provider,
+        secretName: secret.k8sSecretName,
+        keys: secret.keyMappings as Record<string, string>
+      }))
+      .filter((mapping) => getProviderSecretSchema(mapping.provider) !== null);
+
+    // Project mappings override global mappings for the same provider.
+    const mappingsByProvider = new Map<string, { provider: string; secretName: string; keys: Record<string, string> }>();
+    for (const mapping of globalMappings) {
+      mappingsByProvider.set(mapping.provider, mapping);
+    }
+    for (const mapping of projectMappings) {
+      mappingsByProvider.set(mapping.provider, mapping);
+    }
+    mappings = [...mappingsByProvider.values()];
+  }
+
+  return mappings
+    .flatMap((mapping) => materializeProviderSecretEnv(mapping))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+async function deleteShellPod(namespace: string, podName: string): Promise<void> {
+  const kube = getKubeApi();
+  if (!kube) {
+    return;
+  }
+  try {
+    await kube.deleteNamespacedPod({
+      name: podName,
+      namespace
+    });
+  } catch (error) {
+    const status = (error as { statusCode?: number }).statusCode;
+    if (status !== 404) {
+      process.stderr.write(
+        `shell pod cleanup failed namespace=${namespace} pod=${podName}: ${
+          error instanceof Error ? error.message : String(error)
+        }\n`
+      );
+    }
+  }
+}
+
+async function terminateEnvironmentShellSession(
+  sessionId: string,
+  options: { closeClient?: boolean } = {}
+): Promise<void> {
+  const session = environmentShellSessions.get(sessionId);
+  if (!session) {
+    return;
+  }
+  environmentShellSessions.delete(sessionId);
+  clearTimeout(session.ttlTimer);
+
+  if (options.closeClient !== false && session.clientSocket && session.clientSocket.readyState === WebSocket.OPEN) {
+    session.clientSocket.close(1000, "session ended");
+  }
+  session.stdin?.end();
+  session.execSocket?.close();
+  await deleteShellPod(session.namespace, session.podName);
+}
+
+function parseShellStreamPath(pathname: string): { sessionId: string } | null {
+  const match = pathname.match(/^\/api\/environments\/shell\/sessions\/([^/]+)\/stream$/);
+  if (!match) {
+    return null;
+  }
+  return { sessionId: match[1] ?? "" };
 }
 
 async function appendRunEvent(runId: string, type: string, payload: unknown): Promise<void> {
@@ -1189,6 +1352,139 @@ app.patch("/api/environments/:environmentId", async (req, res) => {
   } catch (error) {
     return sendError(res, 404, error instanceof Error ? error.message : String(error));
   }
+});
+
+app.post("/api/environments/:environmentId/shell/sessions", async (req, res) => {
+  const input = createEnvironmentShellSessionSchema.safeParse(req.body);
+  if (!input.success) {
+    return sendError(res, 400, input.error.message);
+  }
+
+  const kube = getKubeApi();
+  if (!kube) {
+    return sendError(res, 409, "kubernetes is not available");
+  }
+
+  const environment = await prisma.environment.findUnique({
+    where: { id: req.params.environmentId }
+  });
+  if (!environment) {
+    return sendError(res, 404, "environment not found");
+  }
+  if (!environment.active) {
+    return sendError(res, 409, `environment ${environment.name} is inactive`);
+  }
+  if (environment.kind !== EnvironmentKind.KUBERNETES_JOB) {
+    return sendError(res, 409, "shell sessions are currently only supported for KUBERNETES_JOB environments");
+  }
+
+  let projectId: string | null = null;
+  let namespace = GLOBAL_SECRET_NAMESPACE;
+  if (input.data.mode === "project") {
+    if (!input.data.projectId) {
+      return sendError(res, 400, "projectId is required for project shell mode");
+    }
+    const project = await prisma.project.findUnique({
+      where: { id: input.data.projectId },
+      select: { id: true, namespace: true }
+    });
+    if (!project) {
+      return sendError(res, 404, "project not found");
+    }
+    projectId = project.id;
+    namespace = project.namespace;
+  }
+
+  const injectSecrets = input.data.injectSecrets ?? true;
+  let podName = "";
+  const sessionId = randomUUID();
+
+  try {
+    await ensureNamespace(namespace);
+    const providerEnv = await resolveShellSecretEnv({
+      mode: input.data.mode,
+      projectId: projectId ?? undefined,
+      injectSecrets
+    });
+    const resources = normalizeEnvironmentResources(environment.resourcesJson);
+    podName = `env-shell-${sessionId.replace(/[^a-z0-9-]+/gi, "").toLowerCase()}`.slice(0, 63);
+    await kube.createNamespacedPod({
+      namespace,
+      body: {
+        apiVersion: "v1",
+        kind: "Pod",
+        metadata: {
+          name: podName,
+          namespace,
+          labels: {
+            "app.kubernetes.io/name": "factory-env-shell",
+            "attractor.shell/session-id": sessionId
+          }
+        },
+        spec: {
+          restartPolicy: "Never",
+          serviceAccountName: environment.serviceAccountName ?? RUNNER_DEFAULT_SERVICE_ACCOUNT,
+          containers: [
+            {
+              name: "shell",
+              image: environment.runnerImage,
+              imagePullPolicy: "IfNotPresent",
+              command: ["sh", "-lc", "while true; do sleep 3600; done"],
+              stdin: true,
+              tty: true,
+              env: providerEnv,
+              ...(resources ? { resources } : {})
+            }
+          ]
+        }
+      } as never
+    });
+    await waitForPodRunning({
+      kube,
+      namespace,
+      podName,
+      timeoutMs: SHELL_POD_READY_TIMEOUT_SECONDS * 1000
+    });
+  } catch (error) {
+    if (podName) {
+      await deleteShellPod(namespace, podName);
+    }
+    return sendError(res, 409, error instanceof Error ? error.message : String(error));
+  }
+
+  const ttlTimer = setTimeout(() => {
+    void terminateEnvironmentShellSession(sessionId);
+  }, SHELL_SESSION_TTL_SECONDS * 1000);
+  environmentShellSessions.set(sessionId, {
+    id: sessionId,
+    environmentId: environment.id,
+    mode: input.data.mode,
+    projectId,
+    namespace,
+    podName,
+    injectSecrets,
+    connected: false,
+    ttlTimer
+  });
+
+  res.status(201).json({
+    session: {
+      id: sessionId,
+      environmentId: environment.id,
+      mode: input.data.mode,
+      projectId,
+      namespace,
+      podName,
+      injectSecrets,
+      expiresAt: new Date(Date.now() + SHELL_SESSION_TTL_SECONDS * 1000).toISOString(),
+      streamPath: `/api/environments/shell/sessions/${sessionId}/stream`
+    }
+  });
+});
+
+app.delete("/api/environments/shell/sessions/:sessionId", async (req, res) => {
+  await terminateEnvironmentShellSession(req.params.sessionId);
+  res.status(204).send();
 });
 
 const createProjectSchema = z.object({
@@ -3094,6 +3390,158 @@ app.use((err: unknown, _req: express.Request, res: express.Response, _next: expr
   res.status(500).json({ error: message });
 });
 
+const server = createServer(app);
+const shellWebSocketServer = new WebSocketServer({ noServer: true });
+
+function sendShellSocketMessage(ws: WebSocket, payload: unknown): void {
+  if (ws.readyState !== WebSocket.OPEN) {
+    return;
+  }
+  ws.send(JSON.stringify(payload));
+}
+
+class ShellStdoutStream extends Writable {
+  columns = 120;
+  rows = 40;
+  constructor(private readonly onData: (chunk: Buffer) => void) {
+    super();
+  }
+
+  _write(chunk: Buffer | string, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
+    this.onData(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    callback();
+  }
+
+  setSize(cols: number, rows: number): void {
+    this.columns = cols;
+    this.rows = rows;
+    this.emit("resize");
+  }
+}
+
+shellWebSocketServer.on("connection", async (ws: WebSocket) => {
+  const sessionId = (ws as unknown as { shellSessionId?: string }).shellSessionId ?? "";
+  const session = environmentShellSessions.get(sessionId);
+  if (!session) {
+    ws.close(1008, "session not found");
+    return;
+  }
+  if (session.connected) {
+    ws.close(1008, "session already connected");
+    return;
+  }
+
+  const kubeConfig = loadKubeConfig();
+  if (!kubeConfig) {
+    ws.close(1011, "kubernetes unavailable");
+    return;
+  }
+
+  session.connected = true;
+  session.clientSocket = ws;
+  const stdin = new PassThrough();
+  session.stdin = stdin;
+
+  const exec = new Exec(kubeConfig);
+  const stdout = new ShellStdoutStream((chunk) => {
+    sendShellSocketMessage(ws, {
+      type: "output",
+      stream: "stdout",
+      data: chunk.toString("utf8")
+    });
+  });
+  const stderr = new Writable({
+    write(chunk, _encoding, callback) {
+      sendShellSocketMessage(ws, {
+        type: "output",
+        stream: "stderr",
+        data: Buffer.from(chunk).toString("utf8")
+      });
+      callback();
+    }
+  });
+
+  sendShellSocketMessage(ws, { type: "status", state: "connecting" });
+  try {
+    const execSocket = await exec.exec(
+      session.namespace,
+      session.podName,
+      "shell",
+      ["/bin/sh"],
+      stdout,
+      stderr,
+      stdin,
+      true,
+      (status) => {
+        sendShellSocketMessage(ws, { type: "exit", status });
+        void terminateEnvironmentShellSession(session.id, { closeClient: false });
+      }
+    );
+    session.execSocket = execSocket as unknown as { close: () => void };
+    sendShellSocketMessage(ws, { type: "status", state: "ready" });
+  } catch (error) {
+    sendShellSocketMessage(ws, {
+      type: "error",
+      message: error instanceof Error ? error.message : String(error)
+    });
+    ws.close(1011, "exec failed");
+    void terminateEnvironmentShellSession(session.id, { closeClient: false });
+    return;
+  }
+
+  ws.on("message", (raw: RawData) => {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw.toString());
+    } catch {
+      return;
+    }
+
+    const message = parsed as Record<string, unknown>;
+    if (message.type === "input" && typeof message.data === "string") {
+      stdin.write(message.data);
+      return;
+    }
+    if (message.type === "resize") {
+      const cols = Number(message.cols);
+      const rows = Number(message.rows);
+      if (Number.isInteger(cols) && Number.isInteger(rows) && cols > 0 && rows > 0) {
+        stdout.setSize(cols, rows);
+      }
+      return;
+    }
+    if (message.type === "terminate") {
+      ws.close(1000, "terminated");
+    }
+  });
+
+  ws.on("close", () => {
+    void terminateEnvironmentShellSession(session.id, { closeClient: false });
+  });
+  ws.on("error", () => {
+    void terminateEnvironmentShellSession(session.id, { closeClient: false });
+  });
+});
+
+server.on("upgrade", (request, socket, head) => {
+  let parsedPath: { sessionId: string } | null = null;
+  try {
+    const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+    parsedPath = parseShellStreamPath(url.pathname);
+  } catch {
+    parsedPath = null;
+  }
+  if (!parsedPath) {
+    socket.destroy();
+    return;
+  }
+
+  shellWebSocketServer.handleUpgrade(request, socket, head, (ws: WebSocket) => {
+    (ws as unknown as { shellSessionId: string }).shellSessionId = parsedPath?.sessionId ?? "";
+    shellWebSocketServer.emit("connection", ws, request);
+  });
+});
+
 let reconcileLoopActive = false;
 function startGitHubReconcileLoop() {
   if (!githubSyncConfig.enabled) {
@@ -3134,7 +3582,7 @@ function startGitHubReconcileLoop() {
   }, intervalMs);
 }
 
-app.listen(PORT, HOST, () => {
+server.listen(PORT, HOST, () => {
   process.stdout.write(`factory-api listening on http://${HOST}:${PORT}\n`);
   startGitHubReconcileLoop();
 });

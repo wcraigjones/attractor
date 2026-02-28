@@ -36,6 +36,37 @@ export interface RunExecutionEnvironment {
   resources?: EnvironmentResources;
 }
 
+export type EnvironmentShellMode = "project" | "system";
+
+export interface EnvironmentShellSessionRequest {
+  mode: EnvironmentShellMode;
+  projectId?: string;
+  injectSecrets?: boolean;
+}
+
+export interface EnvironmentShellSession {
+  id: string;
+  environmentId: string;
+  mode: EnvironmentShellMode;
+  projectId: string | null;
+  namespace: string;
+  podName: string;
+  injectSecrets: boolean;
+  expiresAt: string;
+  streamPath: string;
+}
+
+export type EnvironmentShellClientMessage =
+  | { type: "input"; data: string }
+  | { type: "resize"; cols: number; rows: number }
+  | { type: "terminate" };
+
+export type EnvironmentShellServerMessage =
+  | { type: "status"; state: "starting pod" | "connecting" | "ready" | "disconnected" | "error" }
+  | { type: "output"; stream: "stdout" | "stderr"; data: string }
+  | { type: "exit"; status: unknown }
+  | { type: "error"; message: string };
+
 export interface Project {
   id: string;
   name: string;

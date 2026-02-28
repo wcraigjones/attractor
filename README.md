@@ -77,9 +77,11 @@ Web route map:
 
 - `/`
 - `/projects`
+- `/environments/global`
 - `/attractors/global`
 - `/secrets/global`
 - `/projects/:projectId`
+- `/projects/:projectId/environments`
 - `/projects/:projectId/secrets`
 - `/projects/:projectId/attractors`
 - `/projects/:projectId/github/issues`
@@ -156,6 +158,9 @@ Implemented endpoints:
 - `GET /api/environments`
 - `POST /api/environments`
 - `PATCH /api/environments/{environmentId}`
+- `POST /api/environments/{environmentId}/shell/sessions`
+- `DELETE /api/environments/shell/sessions/{sessionId}`
+- `WS /api/environments/shell/sessions/{sessionId}/stream`
 - `GET /api/secrets/providers`
 - `GET /api/secrets/providers/{provider}`
 - `POST /api/secrets/global`

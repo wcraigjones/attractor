@@ -13,6 +13,7 @@ import {
   listProviders
 } from "../lib/api";
 import { buildEffectiveAttractors } from "../lib/attractors-view";
+import { getInactiveDefaultEnvironment, listActiveEnvironments } from "../lib/environments-view";
 import type { RunType } from "../lib/types";
 import { PageTitle } from "../components/layout/page-title";
 import { Badge } from "../components/ui/badge";
@@ -79,6 +80,14 @@ export function ProjectRunsPage() {
         (environment) => environment.id === project?.defaultEnvironmentId
       ),
     [environmentsQuery.data, project?.defaultEnvironmentId]
+  );
+  const activeEnvironments = useMemo(
+    () => listActiveEnvironments(environmentsQuery.data ?? []),
+    [environmentsQuery.data]
+  );
+  const inactiveDefaultEnvironment = useMemo(
+    () => getInactiveDefaultEnvironment(project, environmentsQuery.data ?? []),
+    [environmentsQuery.data, project]
   );
 
   const statusFilter = searchParams.get("status") ?? "all";
@@ -157,7 +166,26 @@ export function ProjectRunsPage() {
 
   return (
     <div>
-      <PageTitle title="Runs" description="Launch planning or implementation runs and monitor history." />
+      <PageTitle
+        title="Runs"
+        description="Launch planning or implementation runs and monitor history."
+        actions={
+          <Button asChild variant="outline">
+            <Link to={`/projects/${projectId}/environments`}>Manage Environments</Link>
+          </Button>
+        }
+      />
+
+      {inactiveDefaultEnvironment ? (
+        <Card className="mb-4 border-destructive/60">
+          <CardHeader>
+            <CardTitle className="text-destructive">Project default environment is inactive</CardTitle>
+            <CardDescription>
+              Default <span className="mono">{inactiveDefaultEnvironment.name}</span> is inactive. Select a specific active environment for this run or update project defaults.
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      ) : null}
 
       <div className="grid gap-4 lg:grid-cols-[2fr,1fr]">
         <Card>
@@ -323,14 +351,11 @@ export function ProjectRunsPage() {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value={PROJECT_DEFAULT_ENVIRONMENT}>
-                      {defaultEnvironment
-                        ? `Project default (${defaultEnvironment.name})`
-                        : "Project default"}
+                      {defaultEnvironment ? `Project default (${defaultEnvironment.name})` : "Project default"}
                     </SelectItem>
-                    {(environmentsQuery.data ?? []).map((environment) => (
+                    {activeEnvironments.map((environment) => (
                       <SelectItem key={environment.id} value={environment.id}>
                         {environment.name}
-                        {environment.active ? "" : " (inactive)"}
                       </SelectItem>
                     ))}
                   </SelectContent>
