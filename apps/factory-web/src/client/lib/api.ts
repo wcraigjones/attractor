@@ -67,6 +67,11 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
 
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
+    if (response.status === 401 && typeof window !== "undefined") {
+      const returnTo = `${window.location.pathname}${window.location.search}`;
+      const safeReturnTo = returnTo.startsWith("/") ? returnTo : "/";
+      window.location.assign(`/auth/google/start?returnTo=${encodeURIComponent(safeReturnTo)}`);
+    }
     const errorMessage =
       typeof payload?.error === "string" ? payload.error : `${response.status} ${response.statusText}`;
     throw new Error(errorMessage);

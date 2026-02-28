@@ -50,6 +50,12 @@ import {
   materializeProviderSecretEnv,
   toProjectNamespace
 } from "@attractor/shared-k8s";
+import {
+  FACTORY_AUTH_SESSION_COOKIE_NAME,
+  parseCookieHeader,
+  readSessionToken,
+  resolveAuthConfig
+} from "./auth.js";
 import { clampPreviewBytes, isProbablyText, isTextByMetadata } from "./artifact-preview.js";
 import {
   checkConclusionForDecision,
@@ -91,6 +97,33 @@ app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
   if (req.method === "OPTIONS") {
     res.sendStatus(204);
+    return;
+  }
+  next();
+});
+
+const authConfig = resolveAuthConfig(process.env);
+if (authConfig.enabled) {
+  process.stdout.write(`factory-api auth enabled for domain ${authConfig.allowedDomain}\n`);
+}
+
+app.use((req, res, next) => {
+  if (!authConfig.enabled) {
+    next();
+    return;
+  }
+  if (req.path === "/healthz") {
+    next();
+    return;
+  }
+  if (req.method === "POST" && req.path === "/api/github/webhooks") {
+    next();
+    return;
+  }
+  const cookies = parseCookieHeader(req.headers.cookie);
+  const session = readSessionToken(authConfig, cookies[FACTORY_AUTH_SESSION_COOKIE_NAME]);
+  if (!session) {
+    sendError(res, 401, "authentication required");
     return;
   }
   next();
@@ -4712,6 +4745,17 @@ server.on("upgrade", (request, socket, head) => {
   if (!parsedPath) {
     socket.destroy();
     return;
+  }
+  if (authConfig.enabled) {
+    const cookies = parseCookieHeader(request.headers.cookie);
+    const session = readSessionToken(authConfig, cookies[FACTORY_AUTH_SESSION_COOKIE_NAME]);
+    if (!session) {
+      socket.write(
+        "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":\"authentication required\"}"
+      );
+      socket.destroy();
+      return;
+    }
   }
 
   shellWebSocketServer.handleUpgrade(request, socket, head, (ws: WebSocket) => {

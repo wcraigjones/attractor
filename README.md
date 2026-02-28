@@ -85,6 +85,18 @@ The deploy script installs Traefik, applies the factory ingress, and prints dire
 Provider API keys are not required to install or open the UI. The factory boots keyless and you add project-scoped provider keys later from the Web UI (`Project Secrets` page).
 The secrets UI and API also support arbitrary key/value secrets that are not tied to an AI provider mapping.
 
+Optional Google SSO access gate:
+
+- Factory stays open if all auth vars below are unset/empty.
+- Factory enables Google login gate when all are set:
+  - `FACTORY_AUTH_GOOGLE_CLIENT_ID`
+  - `FACTORY_AUTH_GOOGLE_CLIENT_SECRET`
+  - `FACTORY_AUTH_ALLOWED_DOMAIN` (for example `pelicandynamics.com`; subdomains allowed)
+  - `FACTORY_AUTH_SESSION_SECRET`
+- Partial configuration is rejected at startup (all-or-none).
+- With auth enabled, unauthenticated API requests return `401 {"error":"authentication required"}`.
+- Public unauthenticated exceptions in enabled mode: `GET /healthz`, `POST /api/github/webhooks`.
+
 Global shared secrets are also supported from the Web UI (`Global Secrets` page). Global secrets are replicated into each project namespace, and project secrets override global secrets for the same provider.
 
 Global attractors are also supported from the Web UI (`Global Attractors` page). Global attractors are synced into each project, and project attractors with the same name override global attractors in project views and run selection.
@@ -109,6 +121,9 @@ Web route map:
 - `/projects/:projectId/runs`
 - `/runs/:runId`
 - `/runs/:runId/artifacts/:artifactId`
+- `/auth/google/start` (when auth is enabled)
+- `/auth/google/callback` (when auth is enabled)
+- `/auth/logout` (when auth is enabled)
 
 ## Self-Bootstrap Run
 

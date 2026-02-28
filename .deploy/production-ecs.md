@@ -34,6 +34,14 @@ Secrets:
 
 - AWS Secrets Manager for provider credentials and infra secrets
 - Injected into ECS task definitions via `secrets` mappings
+- Optional Google SSO gate (all-or-none):
+  - `FACTORY_AUTH_GOOGLE_CLIENT_ID`
+  - `FACTORY_AUTH_GOOGLE_CLIENT_SECRET`
+  - `FACTORY_AUTH_ALLOWED_DOMAIN`
+  - `FACTORY_AUTH_SESSION_SECRET`
+- If all four are unset, Factory remains open.
+- If partially configured, `factory-api`/`factory-web` should fail fast at startup.
+- With auth enabled, only `GET /healthz` and `POST /api/github/webhooks` remain public.
 
 Per-run execution:
 

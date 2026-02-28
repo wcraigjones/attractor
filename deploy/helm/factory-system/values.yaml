@@ -36,6 +36,12 @@ service:
 web:
   apiBaseUrl: /api
 
+auth:
+  googleClientId: ""
+  googleClientSecret: ""
+  allowedDomain: ""
+  sessionSecret: ""
+
 github:
   appSlug: ""
   appId: ""
