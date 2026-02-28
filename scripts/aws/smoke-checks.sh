@@ -25,18 +25,30 @@ kubectl -n "$NAMESPACE" get pods
 echo "Checking ingress..."
 kubectl -n "$NAMESPACE" get ingress factory-system
 
-echo "Health check: https://${DOMAIN_NAME}/healthz"
-HEALTH_RESPONSE="$(curl -fsS "https://${DOMAIN_NAME}/healthz")"
-echo "Health response: $HEALTH_RESPONSE"
+INGRESS_AUTH_TYPE="$(kubectl -n "$NAMESPACE" get ingress factory-system -o jsonpath='{.metadata.annotations.alb\.ingress\.kubernetes\.io/auth-type}' 2>/dev/null || true)"
 
-echo "API check: https://${DOMAIN_NAME}/api/models/providers"
-API_STATUS="$(curl -fsS -o /tmp/factory-api-providers.json -w '%{http_code}' "https://${DOMAIN_NAME}/api/models/providers")"
-echo "API status: $API_STATUS"
-rm -f /tmp/factory-api-providers.json
+if [[ "$INGRESS_AUTH_TYPE" == "oidc" ]]; then
+  echo "Ingress auth enabled (OIDC). Verifying unauthenticated redirect to Google."
+  REDIRECT_HEADERS="$(curl -sSI "https://${DOMAIN_NAME}/" || true)"
+  echo "$REDIRECT_HEADERS" | head -n 1
+  if ! echo "$REDIRECT_HEADERS" | grep -qiE '^location: https://accounts\.google\.com/'; then
+    echo "error: expected redirect to Google sign-in when OIDC auth is enabled" >&2
+    exit 1
+  fi
+else
+  echo "Health check: https://${DOMAIN_NAME}/healthz"
+  HEALTH_RESPONSE="$(curl -fsS "https://${DOMAIN_NAME}/healthz")"
+  echo "Health response: $HEALTH_RESPONSE"
 
-echo "Web root check: https://${DOMAIN_NAME}/"
-WEB_STATUS="$(curl -fsS -o /dev/null -w '%{http_code}' "https://${DOMAIN_NAME}/")"
-echo "Web status: $WEB_STATUS"
+  echo "API check: https://${DOMAIN_NAME}/api/models/providers"
+  API_STATUS="$(curl -fsS -o /tmp/factory-api-providers.json -w '%{http_code}' "https://${DOMAIN_NAME}/api/models/providers")"
+  echo "API status: $API_STATUS"
+  rm -f /tmp/factory-api-providers.json
+
+  echo "Web root check: https://${DOMAIN_NAME}/"
+  WEB_STATUS="$(curl -fsS -o /dev/null -w '%{http_code}' "https://${DOMAIN_NAME}/")"
+  echo "Web status: $WEB_STATUS"
+fi
 
 if [[ -n "${PROJECT_ID:-}" && -n "${ATTRACTOR_ID:-}" ]]; then
   echo "Queueing validation run for project ${PROJECT_ID}"

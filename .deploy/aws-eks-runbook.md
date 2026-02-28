@@ -72,6 +72,20 @@ IMAGE_TAG=$(git rev-parse --short HEAD) ./scripts/aws/deploy-app.sh
 - `metrics-server` for HPA metrics
 - `gp3` StorageClass (CSI provisioner)
 
+Optional: enforce Google sign-in at ALB (OIDC):
+
+1. In GCP project `ai-hub-483804`, create a Web OAuth client with redirect URI:
+   - `https://factory.pelx.ai/oauth2/idpresponse`
+2. Export client credentials and deploy:
+
+```bash
+GOOGLE_OIDC_ENABLED=true \
+GOOGLE_OIDC_CLIENT_ID=<google-oauth-client-id> \
+GOOGLE_OIDC_CLIENT_SECRET=<google-oauth-client-secret> \
+IMAGE_TAG=$(git rev-parse --short HEAD) \
+./scripts/aws/deploy-app.sh
+```
+
 6. Publish DNS alias:
 
 ```bash
@@ -138,6 +152,12 @@ kubectl -n factory-system get ingress factory-system
 curl -fsS https://factory.pelx.ai/healthz
 curl -fsS https://factory.pelx.ai/api/models/providers
 curl -fsSI https://factory.pelx.ai/
+```
+
+If Google OIDC auth is enabled, unauthenticated checks should redirect to Google instead:
+
+```bash
+curl -sSI https://factory.pelx.ai/ | grep -i '^location: https://accounts.google.com/'
 ```
 
 5. Optional run-path check:

@@ -185,3 +185,27 @@ Actions:
 ```
 
 - `deploy-app.sh` installs/updates metrics-server.
+
+## 10) Google sign-in (OIDC) not working
+
+Checks:
+
+```bash
+kubectl -n factory-system get ingress factory-system -o yaml | rg 'alb.ingress.kubernetes.io/auth'
+kubectl -n factory-system get secret google-oidc
+curl -sSI https://factory.pelx.ai/ | head -n 5
+```
+
+Actions:
+
+- confirm GCP OAuth client redirect URI exactly matches:
+  - `https://factory.pelx.ai/oauth2/idpresponse`
+- ensure `GOOGLE_OIDC_CLIENT_ID` and `GOOGLE_OIDC_CLIENT_SECRET` match the client in project `ai-hub-483804`
+- redeploy:
+
+```bash
+GOOGLE_OIDC_ENABLED=true \
+GOOGLE_OIDC_CLIENT_ID=<client-id> \
+GOOGLE_OIDC_CLIENT_SECRET=<client-secret> \
+./scripts/aws/deploy-app.sh
+```

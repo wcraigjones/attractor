@@ -5,13 +5,24 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/aws/common.sh
 source "$SCRIPT_DIR/common.sh"
 
-require_cmds aws kubectl helm
+require_cmds aws kubectl helm jq
 assert_account
 update_kubeconfig
 
 EBS_CSI_ROLE_NAME="${EBS_CSI_ROLE_NAME:-${STACK_PREFIX}-ebs-csi-controller}"
 EBS_CSI_ADDON_NAME="${EBS_CSI_ADDON_NAME:-aws-ebs-csi-driver}"
 OIDC_THUMBPRINT="${OIDC_THUMBPRINT:-06b25927c42a721631c1efd9431e648fa62e1e39}"
+GOOGLE_OIDC_ENABLED="${GOOGLE_OIDC_ENABLED:-}"
+GOOGLE_OIDC_CLIENT_ID="${GOOGLE_OIDC_CLIENT_ID:-}"
+GOOGLE_OIDC_CLIENT_SECRET="${GOOGLE_OIDC_CLIENT_SECRET:-}"
+GOOGLE_OIDC_SECRET_NAME="${GOOGLE_OIDC_SECRET_NAME:-google-oidc}"
+GOOGLE_OIDC_SCOPE="${GOOGLE_OIDC_SCOPE:-openid email profile}"
+GOOGLE_OIDC_SESSION_TIMEOUT="${GOOGLE_OIDC_SESSION_TIMEOUT:-3600}"
+GOOGLE_OIDC_AUTHORIZATION_ENDPOINT="${GOOGLE_OIDC_AUTHORIZATION_ENDPOINT:-https://accounts.google.com/o/oauth2/v2/auth}"
+GOOGLE_OIDC_TOKEN_ENDPOINT="${GOOGLE_OIDC_TOKEN_ENDPOINT:-https://oauth2.googleapis.com/token}"
+GOOGLE_OIDC_USER_INFO_ENDPOINT="${GOOGLE_OIDC_USER_INFO_ENDPOINT:-https://openidconnect.googleapis.com/v1/userinfo}"
+GOOGLE_OIDC_ISSUER="${GOOGLE_OIDC_ISSUER:-https://accounts.google.com}"
+GOOGLE_OIDC_AUTH_VALUES=""
 
 ensure_ebs_csi_driver() {
   local oidc_issuer_url oidc_provider_path oidc_provider_arn role_arn tmp_dir attached addon_status elapsed
@@ -133,6 +144,74 @@ parameters:
 EOF
 }
 
+configure_google_oidc_auth() {
+  local enabled idp_json
+
+  enabled="false"
+  if [[ "$GOOGLE_OIDC_ENABLED" == "true" ]]; then
+    enabled="true"
+  fi
+  if [[ -n "$GOOGLE_OIDC_CLIENT_ID" && -n "$GOOGLE_OIDC_CLIENT_SECRET" ]]; then
+    enabled="true"
+  fi
+
+  if [[ "$enabled" != "true" ]]; then
+    return 0
+  fi
+
+  if [[ -z "$GOOGLE_OIDC_CLIENT_ID" || -z "$GOOGLE_OIDC_CLIENT_SECRET" ]]; then
+    echo "error: GOOGLE_OIDC_CLIENT_ID and GOOGLE_OIDC_CLIENT_SECRET are required when Google OIDC auth is enabled" >&2
+    exit 1
+  fi
+
+  kubectl -n "$NAMESPACE" create secret generic "$GOOGLE_OIDC_SECRET_NAME" \
+    --from-literal=clientID="$GOOGLE_OIDC_CLIENT_ID" \
+    --from-literal=clientSecret="$GOOGLE_OIDC_CLIENT_SECRET" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
+  cat <<EOF | kubectl -n "$NAMESPACE" apply -f - >/dev/null
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aws-load-balancer-controller-oidc-secret-reader
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["${GOOGLE_OIDC_SECRET_NAME}"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aws-load-balancer-controller-oidc-secret-reader
+subjects:
+  - kind: ServiceAccount
+    name: aws-load-balancer-controller
+    namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aws-load-balancer-controller-oidc-secret-reader
+EOF
+
+  idp_json="$(jq -nc \
+    --arg issuer "$GOOGLE_OIDC_ISSUER" \
+    --arg authorizationEndpoint "$GOOGLE_OIDC_AUTHORIZATION_ENDPOINT" \
+    --arg tokenEndpoint "$GOOGLE_OIDC_TOKEN_ENDPOINT" \
+    --arg userInfoEndpoint "$GOOGLE_OIDC_USER_INFO_ENDPOINT" \
+    --arg secretName "$GOOGLE_OIDC_SECRET_NAME" \
+    '{issuer:$issuer,authorizationEndpoint:$authorizationEndpoint,tokenEndpoint:$tokenEndpoint,userInfoEndpoint:$userInfoEndpoint,secretName:$secretName}')"
+
+  GOOGLE_OIDC_AUTH_VALUES="$(cat <<EOF
+    alb.ingress.kubernetes.io/auth-type: oidc
+    alb.ingress.kubernetes.io/auth-on-unauthenticated-request: authenticate
+    alb.ingress.kubernetes.io/auth-scope: ${GOOGLE_OIDC_SCOPE}
+    alb.ingress.kubernetes.io/auth-session-timeout: "${GOOGLE_OIDC_SESSION_TIMEOUT}"
+    alb.ingress.kubernetes.io/auth-idp-oidc: '${idp_json}'
+EOF
+)"
+}
+
 API_REPO_URI="$(get_stack_output "$ECR_STACK_NAME" ApiRepositoryUri)"
 WEB_REPO_URI="$(get_stack_output "$ECR_STACK_NAME" WebRepositoryUri)"
 CONTROLLER_REPO_URI="$(get_stack_output "$ECR_STACK_NAME" ControllerRepositoryUri)"
@@ -152,6 +231,7 @@ fi
 ensure_ebs_csi_driver
 ensure_metrics_server
 ensure_gp3_storage_class
+configure_google_oidc_auth
 
 TMP_VALUES="$(mktemp)"
 trap 'rm -f "$TMP_VALUES"' EXIT
@@ -175,6 +255,12 @@ ingress:
   annotations:
     alb.ingress.kubernetes.io/certificate-arn: ${CERT_ARN}
 EOF
+
+if [[ -n "$GOOGLE_OIDC_AUTH_VALUES" ]]; then
+  cat >> "$TMP_VALUES" <<EOF
+${GOOGLE_OIDC_AUTH_VALUES}
+EOF
+fi
 
 helm upgrade --install factory-system "$ROOT_DIR/deploy/helm/factory-system" \
   --reset-values \

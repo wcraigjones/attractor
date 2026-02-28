@@ -42,6 +42,19 @@ OIDC_THUMBPRINT=06b25927c42a721631c1efd9431e648fa62e1e39
 EBS_CSI_ADDON_NAME=aws-ebs-csi-driver
 EBS_CSI_ROLE_NAME=attractor-factory-ebs-csi-controller
 
+# Optional: enforce Google sign-in at ALB ingress (OIDC)
+# GCP project for this deployment: ai-hub-483804
+GOOGLE_OIDC_ENABLED=false
+GOOGLE_OIDC_CLIENT_ID=
+GOOGLE_OIDC_CLIENT_SECRET=
+GOOGLE_OIDC_SECRET_NAME=google-oidc
+GOOGLE_OIDC_SCOPE=openid email profile
+GOOGLE_OIDC_SESSION_TIMEOUT=3600
+GOOGLE_OIDC_AUTHORIZATION_ENDPOINT=https://accounts.google.com/o/oauth2/v2/auth
+GOOGLE_OIDC_TOKEN_ENDPOINT=https://oauth2.googleapis.com/token
+GOOGLE_OIDC_USER_INFO_ENDPOINT=https://openidconnect.googleapis.com/v1/userinfo
+GOOGLE_OIDC_ISSUER=https://accounts.google.com
+
 # Optional smoke-check run validation
 PROJECT_ID=
 ATTRACTOR_ID=
