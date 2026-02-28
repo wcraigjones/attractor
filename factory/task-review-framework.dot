@@ -1,0 +1,20 @@
+digraph task_review_framework {
+  rankdir=LR;
+  node [shape=box];
+
+  start [shape=Mdiamond, label="Start"];
+  plan [label="Plan\nGenerate clear implementation plan"]; 
+  implement [label="Implement\nProduce code and artifacts"]; 
+  review_pack [label="Review Pack\nSummarize + rank critical sections + artifacts"];
+  human_review [shape=hexagon, label="Human Review\nChecklist + decision"];
+  rework [label="Rework\nAddress requested changes"];
+  done [shape=Msquare, label="Done"];
+  exception [shape=diamond, label="Exception Path"];
+
+  start -> plan -> implement -> review_pack -> human_review;
+  human_review -> done [label="Approve"];
+  human_review -> rework [label="Request changes / Reject"];
+  rework -> implement;
+  human_review -> exception [label="Exception"];
+  exception -> done;
+}

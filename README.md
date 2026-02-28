@@ -29,6 +29,7 @@ codeagent> Implement Attractor as described by https://github.com/strongdm/attra
 - `deploy/helm/factory-system`: OrbStack-focused Helm chart
 - `prisma/`: Postgres schema + initial migration
 - `factory/self-bootstrap.dot`: baseline self-factory pipeline definition
+- `factory/task-review-framework.dot`: review loop template (summary/critical/artifacts/checklist/decision)
 - `scripts/`: local image build, OrbStack deploy, and self-bootstrap helpers
 
 ## Local Setup
@@ -174,6 +175,8 @@ Implemented endpoints:
 - `GET /api/runs/{runId}/artifacts`
 - `GET /api/runs/{runId}/artifacts/{artifactId}/content`
 - `GET /api/runs/{runId}/artifacts/{artifactId}/download`
+- `GET /api/runs/{runId}/review`
+- `PUT /api/runs/{runId}/review`
 - `POST /api/runs/{runId}/cancel`
 
 Environment images should be digest-pinned for immutable harness execution (for example `ghcr.io/org/runner@sha256:...`).

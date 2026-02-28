@@ -42,7 +42,7 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: factory-api-role
+  name: factory-api-role-{{ include "factory.namespace" . }}
   labels:
     {{- include "factory.labels" . | nindent 4 }}
 rules:
@@ -56,7 +56,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: factory-api-rolebinding
+  name: factory-api-rolebinding-{{ include "factory.namespace" . }}
   labels:
     {{- include "factory.labels" . | nindent 4 }}
 subjects:
@@ -66,12 +66,12 @@ subjects:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: factory-api-role
+  name: factory-api-role-{{ include "factory.namespace" . }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: factory-runner-controller-role
+  name: factory-runner-controller-role-{{ include "factory.namespace" . }}
   labels:
     {{- include "factory.labels" . | nindent 4 }}
 rules:
@@ -85,7 +85,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: factory-runner-controller-rolebinding
+  name: factory-runner-controller-rolebinding-{{ include "factory.namespace" . }}
   labels:
     {{- include "factory.labels" . | nindent 4 }}
 subjects:
@@ -95,7 +95,7 @@ subjects:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: factory-runner-controller-role
+  name: factory-runner-controller-role-{{ include "factory.namespace" . }}
 ---
 apiVersion: v1
 kind: Service

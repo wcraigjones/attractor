@@ -25,6 +25,13 @@ enum RunStatus {
   TIMEOUT
 }
 
+enum ReviewDecision {
+  APPROVE
+  REQUEST_CHANGES
+  REJECT
+  EXCEPTION
+}
+
 enum AttractorScope {
   PROJECT
   GLOBAL
@@ -121,12 +128,31 @@ model Run {
   environment   Environment? @relation(fields: [environmentId], references: [id], onDelete: SetNull)
   events        RunEvent[]
   artifacts     Artifact[]
+  review        RunReview?
   producedSpecBundle SpecBundle? @relation("ProducedSpecBundle")
   referencedSpecBundle SpecBundle? @relation("ReferencedSpecBundle", fields: [specBundleId], references: [id], onDelete: SetNull)
 
   @@index([projectId, status])
   @@index([projectId, targetBranch, runType, status])
   @@index([environmentId])
+}
+
+model RunReview {
+  id               String         @id @default(cuid())
+  runId            String         @unique
+  reviewer         String
+  decision         ReviewDecision
+  checklistJson    Json
+  summary          String?
+  criticalFindings String?
+  artifactFindings String?
+  attestation      String?
+  reviewedAt       DateTime       @default(now())
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  run              Run            @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([reviewedAt])
 }
 
 model Environment {

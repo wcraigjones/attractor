@@ -10,6 +10,8 @@ import type {
   ProjectSecret,
   ProviderSchema,
   Run,
+  RunReviewChecklist,
+  RunReviewResponse,
   RunModelConfig,
   SpecBundle
 } from "./types";
@@ -267,4 +269,26 @@ export async function getRunArtifacts(runId: string): Promise<{ artifacts: Artif
 
 export async function getArtifactContent(runId: string, artifactId: string): Promise<ArtifactContentResponse> {
   return apiRequest<ArtifactContentResponse>(`/api/runs/${runId}/artifacts/${artifactId}/content`);
+}
+
+export async function getRunReview(runId: string): Promise<RunReviewResponse> {
+  return apiRequest<RunReviewResponse>(`/api/runs/${runId}/review`);
+}
+
+export async function upsertRunReview(
+  runId: string,
+  input: {
+    reviewer: string;
+    decision: "APPROVE" | "REQUEST_CHANGES" | "REJECT" | "EXCEPTION";
+    checklist: RunReviewChecklist;
+    summary?: string;
+    criticalFindings?: string;
+    artifactFindings?: string;
+    attestation?: string;
+  }
+): Promise<{ review: RunReviewResponse["review"] }> {
+  return apiRequest<{ review: RunReviewResponse["review"] }>(`/api/runs/${runId}/review`, {
+    method: "PUT",
+    body: JSON.stringify(input)
+  });
 }

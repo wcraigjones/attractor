@@ -2,7 +2,7 @@ import express from "express";
 import { Readable } from "node:stream";
 import { KubeConfig, CoreV1Api } from "@kubernetes/client-node";
 import { App as GitHubApp } from "@octokit/app";
-import { AttractorScope, EnvironmentKind, PrismaClient, RunStatus, RunType } from "@prisma/client";
+import { AttractorScope, EnvironmentKind, PrismaClient, ReviewDecision, RunStatus, RunType } from "@prisma/client";
 import { Redis } from "ioredis";
 import { getModels, getProviders } from "@mariozechner/pi-ai";
 import { GetObjectCommand, HeadObjectCommand, S3Client } from "@aws-sdk/client-s3";
@@ -23,6 +23,16 @@ import {
   toProjectNamespace
 } from "@attractor/shared-k8s";
 import { clampPreviewBytes, isProbablyText, isTextByMetadata } from "./artifact-preview.js";
+import {
+  type ReviewCriticalSection,
+  defaultReviewChecklistValue,
+  extractCriticalSectionsFromDiff,
+  rankReviewArtifacts,
+  reviewChecklistTemplate,
+  reviewSlaStatus,
+  RUN_REVIEW_FRAMEWORK_VERSION,
+  summarizeImplementationNote
+} from "./run-review.js";
 
 const prisma = new PrismaClient();
 const redis = new Redis(process.env.REDIS_URL ?? "redis://127.0.0.1:6379");
@@ -100,6 +110,47 @@ async function getArtifactByRun(runId: string, artifactId: string) {
       runId
     }
   });
+}
+
+async function getObjectText(key: string): Promise<string | null> {
+  try {
+    const output = await minioClient.send(
+      new GetObjectCommand({
+        Bucket: MINIO_BUCKET,
+        Key: key
+      })
+    );
+    if (!output.Body) {
+      return null;
+    }
+    const bytes = await bodyToBuffer(output.Body);
+    return bytes.toString("utf8");
+  } catch {
+    return null;
+  }
+}
+
+function toNullableText(value: string | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function normalizeStoredChecklist(raw: unknown) {
+  const base = defaultReviewChecklistValue();
+  if (!raw || typeof raw !== "object") {
+    return base;
+  }
+
+  const parsed = raw as Record<string, unknown>;
+  return {
+    summaryReviewed: parsed.summaryReviewed === true,
+    criticalCodeReviewed: parsed.criticalCodeReviewed === true,
+    artifactsReviewed: parsed.artifactsReviewed === true,
+    functionalValidationReviewed: parsed.functionalValidationReviewed === true
+  };
 }
 
 function hasProvider(provider: string): boolean {
@@ -1299,6 +1350,36 @@ app.post("/api/projects/:projectId/self-iterate", async (req, res) => {
   });
 });
 
+const runReviewChecklistSchema = z.object({
+  summaryReviewed: z.boolean(),
+  criticalCodeReviewed: z.boolean(),
+  artifactsReviewed: z.boolean(),
+  functionalValidationReviewed: z.boolean()
+});
+
+const upsertRunReviewSchema = z
+  .object({
+    reviewer: z.string().min(2).max(120),
+    decision: z.enum(["APPROVE", "REQUEST_CHANGES", "REJECT", "EXCEPTION"]),
+    checklist: runReviewChecklistSchema,
+    summary: z.string().max(20000).optional(),
+    criticalFindings: z.string().max(20000).optional(),
+    artifactFindings: z.string().max(20000).optional(),
+    attestation: z.string().max(20000).optional()
+  })
+  .refine((value) => {
+    if (value.decision !== "APPROVE") {
+      return true;
+    }
+    return Object.values(value.checklist).every((item) => item === true);
+  }, { message: "All checklist items must be completed before approval." })
+  .refine((value) => {
+    if (value.decision === "APPROVE") {
+      return true;
+    }
+    return !!toNullableText(value.summary) || !!toNullableText(value.criticalFindings) || !!toNullableText(value.artifactFindings);
+  }, { message: "Non-approval decisions require reviewer notes." });
+
 app.get("/api/runs/:runId", async (req, res) => {
   const run = await prisma.run.findUnique({
     where: { id: req.params.runId },
@@ -1368,6 +1449,112 @@ app.get("/api/runs/:runId/artifacts", async (req, res) => {
 
   const specBundle = await prisma.specBundle.findFirst({ where: { runId: req.params.runId } });
   res.json({ artifacts, specBundle });
+});
+
+app.get("/api/runs/:runId/review", async (req, res) => {
+  const run = await prisma.run.findUnique({
+    where: { id: req.params.runId },
+    include: { review: true }
+  });
+  if (!run) {
+    return sendError(res, 404, "run not found");
+  }
+
+  const artifacts = await prisma.artifact.findMany({
+    where: { runId: run.id },
+    orderBy: { createdAt: "asc" }
+  });
+  const rankedArtifacts = rankReviewArtifacts(artifacts);
+  const implementationPatchArtifact = artifacts.find((artifact) => artifact.key === "implementation.patch");
+  const implementationNoteArtifact = artifacts.find((artifact) => artifact.key === "implementation-note.md");
+
+  let criticalSections: ReviewCriticalSection[] = [];
+  if (implementationPatchArtifact) {
+    const patchText = await getObjectText(implementationPatchArtifact.path);
+    if (patchText) {
+      criticalSections = extractCriticalSectionsFromDiff(patchText);
+    }
+  }
+
+  let summarySuggestion = "";
+  if (implementationNoteArtifact) {
+    const noteText = await getObjectText(implementationNoteArtifact.path);
+    if (noteText) {
+      summarySuggestion = summarizeImplementationNote(noteText);
+    }
+  }
+
+  const sla = reviewSlaStatus(run.createdAt);
+  res.json({
+    frameworkVersion: RUN_REVIEW_FRAMEWORK_VERSION,
+    review: run.review
+      ? {
+          ...run.review,
+          checklist: normalizeStoredChecklist(run.review.checklistJson)
+        }
+      : null,
+    checklistTemplate: reviewChecklistTemplate(),
+    pack: {
+      dueAt: sla.dueAt.toISOString(),
+      overdue: sla.overdue,
+      minutesRemaining: sla.minutesRemaining,
+      summarySuggestion,
+      artifactFocus: rankedArtifacts.slice(0, 8),
+      criticalSections: criticalSections.slice(0, 20)
+    }
+  });
+});
+
+app.put("/api/runs/:runId/review", async (req, res) => {
+  const input = upsertRunReviewSchema.safeParse(req.body);
+  if (!input.success) {
+    return sendError(res, 400, input.error.message);
+  }
+
+  const run = await prisma.run.findUnique({
+    where: { id: req.params.runId }
+  });
+  if (!run) {
+    return sendError(res, 404, "run not found");
+  }
+
+  const persisted = await prisma.runReview.upsert({
+    where: { runId: run.id },
+    update: {
+      reviewer: input.data.reviewer,
+      decision: input.data.decision as ReviewDecision,
+      checklistJson: input.data.checklist as never,
+      summary: toNullableText(input.data.summary),
+      criticalFindings: toNullableText(input.data.criticalFindings),
+      artifactFindings: toNullableText(input.data.artifactFindings),
+      attestation: toNullableText(input.data.attestation),
+      reviewedAt: new Date()
+    },
+    create: {
+      runId: run.id,
+      reviewer: input.data.reviewer,
+      decision: input.data.decision as ReviewDecision,
+      checklistJson: input.data.checklist as never,
+      summary: toNullableText(input.data.summary),
+      criticalFindings: toNullableText(input.data.criticalFindings),
+      artifactFindings: toNullableText(input.data.artifactFindings),
+      attestation: toNullableText(input.data.attestation),
+      reviewedAt: new Date()
+    }
+  });
+
+  await appendRunEvent(run.id, "RunReviewUpdated", {
+    runId: run.id,
+    reviewer: persisted.reviewer,
+    decision: persisted.decision
+  });
+
+  res.json({
+    review: {
+      ...persisted,
+      checklist: normalizeStoredChecklist(persisted.checklistJson)
+    }
+  });
 });
 
 app.get("/api/runs/:runId/artifacts/:artifactId/content", async (req, res) => {

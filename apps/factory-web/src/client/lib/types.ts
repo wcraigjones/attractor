@@ -119,6 +119,67 @@ export interface Run {
   events?: RunEvent[];
 }
 
+export type ReviewDecision = "APPROVE" | "REQUEST_CHANGES" | "REJECT" | "EXCEPTION";
+
+export interface RunReviewChecklist {
+  summaryReviewed: boolean;
+  criticalCodeReviewed: boolean;
+  artifactsReviewed: boolean;
+  functionalValidationReviewed: boolean;
+}
+
+export interface RunReview {
+  id: string;
+  runId: string;
+  reviewer: string;
+  decision: ReviewDecision;
+  checklist: RunReviewChecklist;
+  summary: string | null;
+  criticalFindings: string | null;
+  artifactFindings: string | null;
+  attestation: string | null;
+  reviewedAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReviewChecklistTemplateItem {
+  key: keyof RunReviewChecklist;
+  label: string;
+}
+
+export interface ReviewPackArtifact {
+  id: string;
+  key: string;
+  path: string;
+  contentType?: string | null;
+  sizeBytes?: number | null;
+  priority: number;
+  reason: string;
+}
+
+export interface ReviewCriticalSection {
+  path: string;
+  riskLevel: "high" | "medium" | "low";
+  reason: string;
+}
+
+export interface RunReviewPack {
+  dueAt: string;
+  overdue: boolean;
+  minutesRemaining: number;
+  summarySuggestion: string;
+  artifactFocus: ReviewPackArtifact[];
+  criticalSections: ReviewCriticalSection[];
+}
+
+export interface RunReviewResponse {
+  frameworkVersion: string;
+  review: RunReview | null;
+  checklistTemplate: ReviewChecklistTemplateItem[];
+  pack: RunReviewPack;
+}
+
 export interface Artifact {
   id: string;
   runId: string;
