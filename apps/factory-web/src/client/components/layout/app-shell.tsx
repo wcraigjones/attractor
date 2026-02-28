@@ -8,6 +8,7 @@ import {
   buildScopeOptions,
   GLOBAL_SCOPE_VALUE,
   isGlobalAttractorsPath,
+  isGlobalEnvironmentsPath,
   isGlobalSecretsPath,
   resolveSelectedScope,
   scopeToPath
@@ -108,6 +109,11 @@ export function AppShell() {
         break;
       }
 
+      if (part === "environments" && parts[index + 1] === "global") {
+        items.push({ href: "/environments/global", label: "Global Environments" });
+        break;
+      }
+
       if (part === "projects" && index + 1 < parts.length) {
         const projectId = parts[index + 1] ?? "";
         const project = projectsQuery.data?.find((candidate) => candidate.id === projectId);
@@ -169,6 +175,19 @@ export function AppShell() {
           {globalScopeSelected ? (
             <div className="mt-4 space-y-1 border-t border-border pt-4">
               <NavLink
+                to="/environments/global"
+                className={({ isActive }) =>
+                  cn(
+                    "block rounded-md px-3 py-2 text-sm",
+                    isActive || isGlobalEnvironmentsPath(location.pathname)
+                      ? "bg-secondary text-secondary-foreground"
+                      : "text-muted-foreground hover:bg-muted"
+                  )
+                }
+              >
+                Environments
+              </NavLink>
+              <NavLink
                 to="/secrets/global"
                 className={({ isActive }) =>
                   cn(
@@ -199,6 +218,7 @@ export function AppShell() {
             <div className="mt-4 space-y-1 border-t border-border pt-4">
               {[
                 { to: `/projects/${selectedProjectId}`, label: "Overview" },
+                { to: `/projects/${selectedProjectId}/environments`, label: "Environments" },
                 { to: `/projects/${selectedProjectId}/secrets`, label: "Secrets" },
                 { to: `/projects/${selectedProjectId}/attractors`, label: "Attractors" },
                 { to: `/projects/${selectedProjectId}/github/issues`, label: "GitHub Issues" },

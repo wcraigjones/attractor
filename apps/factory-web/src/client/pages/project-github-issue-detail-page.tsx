@@ -8,8 +8,10 @@ import {
   launchIssueRun,
   listEnvironments,
   listModels,
+  listProjects,
   listProviders
 } from "../lib/api";
+import { getInactiveDefaultEnvironment, listActiveEnvironments } from "../lib/environments-view";
 import type { RunType } from "../lib/types";
 import { PageTitle } from "../components/layout/page-title";
 import { Badge } from "../components/ui/badge";
@@ -50,6 +52,10 @@ export function ProjectGitHubIssueDetailPage() {
   const environmentsQuery = useQuery({
     queryKey: ["environments"],
     queryFn: listEnvironments
+  });
+  const projectsQuery = useQuery({
+    queryKey: ["projects"],
+    queryFn: listProjects
   });
 
   useEffect(() => {
@@ -96,6 +102,18 @@ export function ProjectGitHubIssueDetailPage() {
 
   const linkedRuns = useMemo(() => detailQuery.data?.runs ?? [], [detailQuery.data?.runs]);
   const linkedPullRequests = useMemo(() => detailQuery.data?.pullRequests ?? [], [detailQuery.data?.pullRequests]);
+  const activeEnvironments = useMemo(
+    () => listActiveEnvironments(environmentsQuery.data ?? []),
+    [environmentsQuery.data]
+  );
+  const project = useMemo(
+    () => (projectsQuery.data ?? []).find((candidate) => candidate.id === projectId),
+    [projectId, projectsQuery.data]
+  );
+  const inactiveDefaultEnvironment = useMemo(
+    () => getInactiveDefaultEnvironment(project, environmentsQuery.data ?? []),
+    [environmentsQuery.data, project]
+  );
 
   if (!detailQuery.data) {
     return <p className="text-sm text-muted-foreground">Loading issue...</p>;
@@ -114,6 +132,17 @@ export function ProjectGitHubIssueDetailPage() {
           </Button>
         }
       />
+
+      {inactiveDefaultEnvironment ? (
+        <Card className="mb-4 border-destructive/60">
+          <CardHeader>
+            <CardTitle className="text-destructive">Project default environment is inactive</CardTitle>
+            <CardDescription>
+              Default <span className="mono">{inactiveDefaultEnvironment.name}</span> is inactive. Select an active environment for this run.
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      ) : null}
 
       <div className="grid gap-4 lg:grid-cols-[2fr,1fr]">
         <Card>
@@ -187,7 +216,7 @@ export function ProjectGitHubIssueDetailPage() {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value={PROJECT_DEFAULT_ENVIRONMENT}>Project default</SelectItem>
-                    {(environmentsQuery.data ?? []).map((environment) => (
+                    {activeEnvironments.map((environment) => (
                       <SelectItem key={environment.id} value={environment.id}>
                         {environment.name}
                       </SelectItem>

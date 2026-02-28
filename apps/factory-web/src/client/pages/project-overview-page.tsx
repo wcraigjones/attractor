@@ -17,6 +17,7 @@ import {
   startGitHubAppManifestSetup
 } from "../lib/api";
 import { buildEffectiveAttractors } from "../lib/attractors-view";
+import { getInactiveDefaultEnvironment, listActiveEnvironments } from "../lib/environments-view";
 import { PageTitle } from "../components/layout/page-title";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../components/ui/card";
@@ -146,11 +147,13 @@ export function ProjectOverviewPage() {
     }
   });
 
-  const effectiveDefaultEnvironmentId =
-    selectedDefaultEnvironmentId || project?.defaultEnvironmentId || "";
   const defaultEnvironment = (environmentsQuery.data ?? []).find(
     (environment) => environment.id === project?.defaultEnvironmentId
   );
+  const activeEnvironments = listActiveEnvironments(environmentsQuery.data ?? []);
+  const inactiveDefaultEnvironment = getInactiveDefaultEnvironment(project, environmentsQuery.data ?? []);
+  const effectiveDefaultEnvironmentId =
+    selectedDefaultEnvironmentId || (defaultEnvironment?.active ? defaultEnvironment.id : "");
 
   useEffect(() => {
     if (!project) {
@@ -206,11 +209,27 @@ export function ProjectOverviewPage() {
         title={project.name}
         description={`Namespace: ${project.namespace}`}
         actions={
-          <Button asChild variant="outline">
-            <Link to={`/projects/${project.id}/runs`}>Start Run</Link>
-          </Button>
+          <div className="flex gap-2">
+            <Button asChild variant="outline">
+              <Link to={`/projects/${project.id}/environments`}>Manage Environments</Link>
+            </Button>
+            <Button asChild variant="outline">
+              <Link to={`/projects/${project.id}/runs`}>Start Run</Link>
+            </Button>
+          </div>
         }
       />
+
+      {inactiveDefaultEnvironment ? (
+        <Card className="mb-4 border-destructive/60">
+          <CardHeader>
+            <CardTitle className="text-destructive">Default environment is inactive</CardTitle>
+            <CardDescription>
+              <span className="mono">{inactiveDefaultEnvironment.name}</span> is inactive. Select an active environment below.
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      ) : null}
 
       <div className="grid gap-4 md:grid-cols-3">
         <Card>
@@ -405,10 +424,9 @@ export function ProjectOverviewPage() {
                   <SelectValue placeholder="Select environment" />
                 </SelectTrigger>
                 <SelectContent>
-                  {(environmentsQuery.data ?? []).map((environment) => (
+                  {activeEnvironments.map((environment) => (
                     <SelectItem key={environment.id} value={environment.id}>
                       {environment.name}
-                      {environment.active ? "" : " (inactive)"}
                     </SelectItem>
                   ))}
                 </SelectContent>

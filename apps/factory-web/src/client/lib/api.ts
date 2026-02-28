@@ -5,6 +5,8 @@ import type {
   AttractorValidation,
   AttractorVersion,
   Environment,
+  EnvironmentShellSession,
+  EnvironmentShellSessionRequest,
   EnvironmentResources,
   GitHubAppStatus,
   GitHubIssue,
@@ -40,6 +42,18 @@ export function buildApiUrl(path: string): string {
     return `${base}${normalizedPath.slice(4)}`;
   }
   return `${base}${normalizedPath}`;
+}
+
+export function buildWebSocketUrl(path: string): string {
+  const httpUrl = buildApiUrl(path);
+  if (httpUrl.startsWith("https://")) {
+    return `wss://${httpUrl.slice("https://".length)}`;
+  }
+  if (httpUrl.startsWith("http://")) {
+    return `ws://${httpUrl.slice("http://".length)}`;
+  }
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}${httpUrl}`;
 }
 
 async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
@@ -255,6 +269,26 @@ export async function updateEnvironment(
   return apiRequest<Environment>(`/api/environments/${environmentId}`, {
     method: "PATCH",
     body: JSON.stringify(input)
+  });
+}
+
+export async function createEnvironmentShellSession(
+  environmentId: string,
+  input: EnvironmentShellSessionRequest
+): Promise<EnvironmentShellSession> {
+  const payload = await apiRequest<{ session: EnvironmentShellSession }>(
+    `/api/environments/${environmentId}/shell/sessions`,
+    {
+      method: "POST",
+      body: JSON.stringify(input)
+    }
+  );
+  return payload.session;
+}
+
+export async function terminateEnvironmentShellSession(sessionId: string): Promise<void> {
+  await apiRequest<unknown>(`/api/environments/shell/sessions/${sessionId}`, {
+    method: "DELETE"
   });
 }
 
