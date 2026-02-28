@@ -28,6 +28,13 @@ describe("scope selector helpers", () => {
     expect(isGlobalAttractorsPath("/attractors/global")).toBe(true);
   });
 
+  it("keeps global scope fallback on non-project routes", () => {
+    expect(resolveSelectedScope({ pathname: "/", fallbackProjectId: GLOBAL_SCOPE_VALUE })).toBe(GLOBAL_SCOPE_VALUE);
+    expect(resolveSelectedScope({ pathname: "/projects", fallbackProjectId: GLOBAL_SCOPE_VALUE })).toBe(
+      GLOBAL_SCOPE_VALUE
+    );
+  });
+
   it("builds options with Global as first row", () => {
     const options = buildScopeOptions([
       { id: "proj-1", name: "Project One" },

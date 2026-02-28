@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFile } from "node:child_process";
@@ -12,7 +12,7 @@ import {
   CreateBucketCommand
 } from "@aws-sdk/client-s3";
 import { App as GitHubApp } from "@octokit/app";
-import { PrismaClient, RunStatus, RunType } from "@prisma/client";
+import { PrismaClient, RunQuestionStatus, RunStatus, RunType } from "@prisma/client";
 import { Redis } from "ioredis";
 import {
   getModel,
@@ -28,10 +28,20 @@ import {
   runCancelKey,
   runEventChannel,
   runLockKey,
+  type RunModelConfig,
   type RunExecutionEnvironment,
   type RunExecutionSpec
 } from "@attractor/shared-types";
 import { extractUnifiedDiff } from "./patch.js";
+import {
+  applyGraphTransforms,
+  executeGraph,
+  parseDotGraph,
+  parseModelStylesheet,
+  validateDotGraph,
+  type DotNode,
+  type EngineState
+} from "./engine/index.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -98,18 +108,47 @@ function parseEnvironmentSpec(spec: RunExecutionSpec): RunExecutionEnvironment {
   };
 }
 
-function ensureModel(spec: RunExecutionSpec) {
-  if (!getProviders().includes(spec.modelConfig.provider as never)) {
-    throw new Error(`Unknown provider ${spec.modelConfig.provider}`);
+function modelExists(config: Pick<RunModelConfig, "provider" | "modelId">): boolean {
+  if (!getProviders().includes(config.provider as never)) {
+    return false;
+  }
+  return getModels(config.provider as never).some((model) => model.id === config.modelId);
+}
+
+function resolveModelConfig(config: RunModelConfig): {
+  resolved: RunModelConfig;
+  fallback?: { fromModelId: string; toModelId: string; reason: string };
+} {
+  if (modelExists(config)) {
+    return { resolved: config };
   }
 
-  const models = getModels(spec.modelConfig.provider as never);
-  const found = models.find((model) => model.id === spec.modelConfig.modelId);
-  if (!found) {
-    throw new Error(`Unknown model ${spec.modelConfig.modelId} for provider ${spec.modelConfig.provider}`);
+  if (config.provider === "openrouter" && config.modelId === "openai/gpt-5.3-codex") {
+    const fallbackModel = "openai/gpt-5.2-codex";
+    if (modelExists({ provider: "openrouter", modelId: fallbackModel })) {
+      return {
+        resolved: { ...config, modelId: fallbackModel },
+        fallback: {
+          fromModelId: config.modelId,
+          toModelId: fallbackModel,
+          reason: "openai/gpt-5.3-codex not present in runtime model catalog"
+        }
+      };
+    }
   }
 
-  return getModel(spec.modelConfig.provider as never, spec.modelConfig.modelId as never);
+  throw new Error(`Unknown model ${config.modelId} for provider ${config.provider}`);
+}
+
+function ensureModel(config: RunModelConfig) {
+  if (!getProviders().includes(config.provider as never)) {
+    throw new Error(`Unknown provider ${config.provider}`);
+  }
+  const model = getModel(config.provider as never, config.modelId as never);
+  if (!model) {
+    throw new Error(`Unknown model ${config.modelId} for provider ${config.provider}`);
+  }
+  return model;
 }
 
 function toStreamEvent(event: AssistantMessageEvent): { type: string; payload: unknown } | null {
@@ -157,8 +196,14 @@ function textFromMessage(message: AssistantMessage): string {
     .join("");
 }
 
-async function runCodergen(prompt: string, spec: RunExecutionSpec, runId: string): Promise<string> {
-  const model = ensureModel(spec);
+async function runCodergen(
+  prompt: string,
+  runId: string,
+  modelConfig: RunModelConfig,
+  eventNamespace = "Model"
+): Promise<{ text: string; modelConfig: RunModelConfig; fallback?: { fromModelId: string; toModelId: string; reason: string } }> {
+  const resolved = resolveModelConfig(modelConfig);
+  const model = ensureModel(resolved.resolved);
   const context: Context = {
     messages: [
       {
@@ -172,17 +217,17 @@ async function runCodergen(prompt: string, spec: RunExecutionSpec, runId: string
   const maxRounds = 8;
   for (let round = 1; round <= maxRounds; round += 1) {
     const stream = streamSimple(model, context, {
-      ...(spec.modelConfig.reasoningLevel ? { reasoning: spec.modelConfig.reasoningLevel } : {}),
-      ...(spec.modelConfig.temperature !== undefined
-        ? { temperature: spec.modelConfig.temperature }
+      ...(resolved.resolved.reasoningLevel ? { reasoning: resolved.resolved.reasoningLevel } : {}),
+      ...(resolved.resolved.temperature !== undefined
+        ? { temperature: resolved.resolved.temperature }
         : {}),
-      ...(spec.modelConfig.maxTokens !== undefined ? { maxTokens: spec.modelConfig.maxTokens } : {})
+      ...(resolved.resolved.maxTokens !== undefined ? { maxTokens: resolved.resolved.maxTokens } : {})
     });
 
     for await (const event of stream) {
       const mapped = toStreamEvent(event);
       if (mapped) {
-        await appendRunEvent(runId, `Model${mapped.type}`, { round, payload: mapped.payload });
+        await appendRunEvent(runId, `${eventNamespace}${mapped.type}`, { round, payload: mapped.payload });
       }
     }
 
@@ -194,7 +239,7 @@ async function runCodergen(prompt: string, spec: RunExecutionSpec, runId: string
     );
 
     if (toolCalls.length === 0) {
-      return textFromMessage(message);
+      return { text: textFromMessage(message), modelConfig: resolved.resolved, ...(resolved.fallback ? { fallback: resolved.fallback } : {}) };
     }
 
     for (const toolCall of toolCalls) {
@@ -215,6 +260,270 @@ async function runCodergen(prompt: string, spec: RunExecutionSpec, runId: string
   }
 
   throw new Error(`Model loop exceeded ${maxRounds} rounds`);
+}
+
+const SNAPSHOT_IGNORED_DIRS = new Set([
+  ".git",
+  ".hg",
+  ".svn",
+  "node_modules",
+  "dist",
+  "build",
+  "coverage",
+  ".next",
+  ".turbo",
+  ".cache"
+]);
+
+const SNAPSHOT_MAX_FILES = 200;
+const SNAPSHOT_MAX_TOTAL_CHARS = 220_000;
+const SNAPSHOT_MAX_FILE_CHARS = 8_000;
+const SNAPSHOT_MAX_FILE_SIZE_BYTES = 256_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function parseOptionalFloat(value: string | undefined): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function parseOptionalInt(value: string | undefined): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function parseReasoningLevel(
+  value: string | undefined
+): RunModelConfig["reasoningLevel"] | undefined {
+  if (
+    value === "minimal" ||
+    value === "low" ||
+    value === "medium" ||
+    value === "high" ||
+    value === "xhigh"
+  ) {
+    return value;
+  }
+  return undefined;
+}
+
+function isProbablyBinary(content: Buffer): boolean {
+  const length = Math.min(content.length, 1024);
+  for (let index = 0; index < length; index += 1) {
+    if (content[index] === 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function shouldIgnoreSnapshotPath(path: string): boolean {
+  const parts = path.split("/").filter(Boolean);
+  return parts.some((part) => SNAPSHOT_IGNORED_DIRS.has(part));
+}
+
+function listRepositoryFiles(rootDir: string, relDir = ""): string[] {
+  const absoluteDir = relDir ? join(rootDir, relDir) : rootDir;
+  const entries = readdirSync(absoluteDir, { withFileTypes: true })
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const files: string[] = [];
+
+  for (const entry of entries) {
+    const relPath = relDir ? `${relDir}/${entry.name}` : entry.name;
+    if (shouldIgnoreSnapshotPath(relPath)) {
+      continue;
+    }
+
+    if (entry.isDirectory()) {
+      files.push(...listRepositoryFiles(rootDir, relPath));
+      continue;
+    }
+
+    if (entry.isFile()) {
+      files.push(relPath);
+    }
+  }
+
+  return files;
+}
+
+function buildRepositorySnapshot(rootDir: string): {
+  tree: string;
+  content: string;
+  filesIncluded: number;
+  truncated: boolean;
+} {
+  const files = listRepositoryFiles(rootDir);
+  const tree = files.length > 0 ? files.join("\n") : "(no files found)";
+
+  const sections: string[] = [];
+  let totalChars = 0;
+  let filesIncluded = 0;
+  let truncated = false;
+
+  for (const filePath of files) {
+    if (filesIncluded >= SNAPSHOT_MAX_FILES) {
+      truncated = true;
+      break;
+    }
+
+    const absolutePath = join(rootDir, filePath);
+    const size = statSync(absolutePath).size;
+    if (size > SNAPSHOT_MAX_FILE_SIZE_BYTES) {
+      continue;
+    }
+
+    const raw = readFileSync(absolutePath);
+    if (isProbablyBinary(raw)) {
+      continue;
+    }
+
+    const text = raw.toString("utf8");
+    const clipped = text.slice(0, SNAPSHOT_MAX_FILE_CHARS);
+    const section = [
+      `### ${filePath}`,
+      "```",
+      clipped,
+      "```"
+    ].join("\n");
+
+    if (totalChars + section.length > SNAPSHOT_MAX_TOTAL_CHARS) {
+      truncated = true;
+      break;
+    }
+
+    sections.push(section);
+    totalChars += section.length;
+    filesIncluded += 1;
+    if (clipped.length < text.length) {
+      truncated = true;
+    }
+  }
+
+  const content = [
+    "## Repository Tree",
+    "```text",
+    tree,
+    "```",
+    "",
+    "## Repository Content Snapshot",
+    sections.join("\n\n"),
+    truncated
+      ? "\n[Snapshot truncated to fit execution limits]"
+      : ""
+  ]
+    .filter((part) => part.length > 0)
+    .join("\n");
+
+  return {
+    tree,
+    content,
+    filesIncluded,
+    truncated
+  };
+}
+
+function stringMap(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object") {
+    return {};
+  }
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => typeof item === "string")
+      .map(([key, item]) => [key, item as string])
+  );
+}
+
+function nestedStringMap(value: unknown): Record<string, Record<string, string>> {
+  if (!value || typeof value !== "object") {
+    return {};
+  }
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, stringMap(item)])
+  );
+}
+
+function normalizeEngineState(value: unknown): EngineState | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const payload = value as Record<string, unknown>;
+  return {
+    context:
+      payload.context && typeof payload.context === "object"
+        ? (payload.context as Record<string, unknown>)
+        : {},
+    nodeOutputs: stringMap(payload.nodeOutputs),
+    parallelOutputs: nestedStringMap(payload.parallelOutputs)
+  };
+}
+
+function answerText(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (value && typeof value === "object") {
+    const text = (value as { text?: unknown }).text;
+    if (typeof text === "string") {
+      return text;
+    }
+  }
+  return "";
+}
+
+function nodeModelConfig(defaultConfig: RunModelConfig, node: DotNode): RunModelConfig {
+  const reasoningLevel =
+    parseReasoningLevel(node.attrs.reasoning ?? node.attrs.reasoning_level) ??
+    defaultConfig.reasoningLevel;
+  const temperature = parseOptionalFloat(node.attrs.temperature) ?? defaultConfig.temperature;
+  const maxTokens =
+    parseOptionalInt(node.attrs.max_tokens ?? node.attrs.maxTokens) ?? defaultConfig.maxTokens;
+
+  return {
+    provider: node.attrs.provider ?? defaultConfig.provider,
+    modelId: node.attrs.model ?? node.attrs.model_id ?? defaultConfig.modelId,
+    ...(reasoningLevel ? { reasoningLevel } : {}),
+    ...(temperature !== undefined ? { temperature } : {}),
+    ...(maxTokens !== undefined ? { maxTokens } : {})
+  };
+}
+
+function renderTaskReport(args: {
+  output: string;
+  runId: string;
+  repoFullName: string;
+  sourceBranch: string;
+  exitNodeId: string;
+  finalNodeId: string | null;
+  modelResolutions: Array<{
+    nodeId: string;
+    requested: RunModelConfig;
+    resolved: RunModelConfig;
+    fallback?: { fromModelId: string; toModelId: string; reason: string };
+  }>;
+}): string {
+  const metadata = {
+    runId: args.runId,
+    repository: args.repoFullName,
+    sourceBranch: args.sourceBranch,
+    exitNodeId: args.exitNodeId,
+    finalNodeId: args.finalNodeId,
+    generatedAt: new Date().toISOString(),
+    modelResolutions: args.modelResolutions
+  };
+
+  const body = args.output.trim().length > 0 ? args.output.trim() : "_No report content generated._";
+  return `<!--\n${JSON.stringify(metadata, null, 2)}\n-->\n\n${body}\n`;
 }
 
 async function ensureBucketExists(): Promise<void> {
@@ -416,6 +725,343 @@ async function createPullRequest(args: {
   return pr.data.html_url ?? null;
 }
 
+async function assertRunNotCanceled(runId: string): Promise<void> {
+  const canceled = await redis.get(runCancelKey(runId));
+  if (canceled) {
+    throw new Error("Run canceled during execution");
+  }
+}
+
+async function waitForHumanQuestion(args: {
+  runId: string;
+  nodeId: string;
+  prompt: string;
+  options?: string[];
+  timeoutMs?: number;
+}): Promise<string> {
+  const existingPending = await prisma.runQuestion.findFirst({
+    where: {
+      runId: args.runId,
+      nodeId: args.nodeId,
+      prompt: args.prompt,
+      status: RunQuestionStatus.PENDING
+    },
+    orderBy: { createdAt: "desc" }
+  });
+
+  if (!existingPending) {
+    const existingAnswered = await prisma.runQuestion.findFirst({
+      where: {
+        runId: args.runId,
+        nodeId: args.nodeId,
+        prompt: args.prompt,
+        status: RunQuestionStatus.ANSWERED
+      },
+      orderBy: { answeredAt: "desc" }
+    });
+    if (existingAnswered) {
+      const text = answerText(existingAnswered.answer);
+      if (text.trim().length > 0) {
+        return text;
+      }
+    }
+  }
+
+  const question =
+    existingPending ??
+    (await prisma.runQuestion.create({
+      data: {
+        runId: args.runId,
+        nodeId: args.nodeId,
+        prompt: args.prompt,
+        options: args.options as never
+      }
+    }));
+
+  await appendRunEvent(args.runId, "HumanQuestionPending", {
+    runId: args.runId,
+    questionId: question.id,
+    nodeId: args.nodeId,
+    prompt: args.prompt,
+    hasOptions: Boolean(args.options && args.options.length > 0),
+    timeoutMs: args.timeoutMs ?? null
+  });
+
+  const deadline = args.timeoutMs ? Date.now() + args.timeoutMs : null;
+  while (true) {
+    await assertRunNotCanceled(args.runId);
+
+    const current = await prisma.runQuestion.findUnique({
+      where: { id: question.id }
+    });
+    if (!current) {
+      throw new Error(`Question ${question.id} no longer exists`);
+    }
+
+    if (current.status === RunQuestionStatus.ANSWERED) {
+      const text = answerText(current.answer);
+      if (text.trim().length === 0) {
+        throw new Error(`Question ${question.id} has an empty answer`);
+      }
+      await appendRunEvent(args.runId, "HumanQuestionAnswered", {
+        runId: args.runId,
+        questionId: question.id,
+        nodeId: args.nodeId
+      });
+      return text;
+    }
+
+    if (current.status === RunQuestionStatus.TIMEOUT) {
+      throw new Error(`Question ${question.id} timed out`);
+    }
+
+    if (deadline && Date.now() > deadline) {
+      await prisma.runQuestion.updateMany({
+        where: {
+          id: question.id,
+          status: RunQuestionStatus.PENDING
+        },
+        data: {
+          status: RunQuestionStatus.TIMEOUT
+        }
+      });
+      await appendRunEvent(args.runId, "HumanQuestionTimedOut", {
+        runId: args.runId,
+        questionId: question.id,
+        nodeId: args.nodeId,
+        timeoutMs: args.timeoutMs
+      });
+      throw new Error(`Question ${question.id} timed out`);
+    }
+
+    await sleep(2000);
+  }
+}
+
+function selectFinalOutputNodeId(graph: ReturnType<typeof parseDotGraph>, state: EngineState): string | null {
+  const preferredIds = [
+    graph.graphAttrs.final_output_node,
+    graph.graphAttrs.finalOutputNode,
+    graph.graphAttrs.synthesis_node,
+    graph.graphAttrs.synthesisNode
+  ]
+    .map((item) => item?.trim() ?? "")
+    .filter((item) => item.length > 0);
+
+  for (const nodeId of preferredIds) {
+    if (state.nodeOutputs[nodeId] && state.nodeOutputs[nodeId].trim().length > 0) {
+      return nodeId;
+    }
+  }
+
+  for (let index = graph.nodeOrder.length - 1; index >= 0; index -= 1) {
+    const nodeId = graph.nodeOrder[index] ?? "";
+    const output = state.nodeOutputs[nodeId];
+    if (output && output.trim().length > 0) {
+      return nodeId;
+    }
+  }
+
+  return null;
+}
+
+async function processTaskRun(args: {
+  runId: string;
+  projectId: string;
+  repoFullName: string;
+  sourceBranch: string;
+  targetBranch: string;
+  workDir: string;
+  attractorContent: string;
+  modelConfig: RunModelConfig;
+  checkpoint: { currentNodeId: string; contextJson: unknown } | null;
+}): Promise<{
+  artifactKey: string;
+  artifactPath: string;
+  exitNodeId: string;
+  finalNodeId: string | null;
+}> {
+  const parsed = parseDotGraph(args.attractorContent);
+  validateDotGraph(parsed);
+  const graph = applyGraphTransforms(parsed);
+
+  const stylesheetConfig = graph.graphAttrs.model_stylesheet ?? graph.graphAttrs.modelStylesheet;
+  if (stylesheetConfig && stylesheetConfig.trim().length > 0) {
+    const trimmed = stylesheetConfig.trim();
+    const source = trimmed.includes("{")
+      ? trimmed
+      : readFileSync(join(args.workDir, trimmed), "utf8");
+    const rules = parseModelStylesheet(source);
+    await appendRunEvent(args.runId, "ModelStylesheetLoaded", {
+      runId: args.runId,
+      ruleCount: rules.length
+    });
+  }
+
+  const snapshot = buildRepositorySnapshot(args.workDir);
+  await appendRunEvent(args.runId, "TaskRepositorySnapshotPrepared", {
+    runId: args.runId,
+    filesIncluded: snapshot.filesIncluded,
+    truncated: snapshot.truncated
+  });
+
+  const restoredState = normalizeEngineState(args.checkpoint?.contextJson);
+  const initialState: EngineState =
+    restoredState ?? {
+      context: {},
+      nodeOutputs: {},
+      parallelOutputs: {}
+    };
+
+  initialState.context = {
+    ...initialState.context,
+    runId: args.runId,
+    repository: args.repoFullName,
+    sourceBranch: args.sourceBranch,
+    targetBranch: args.targetBranch,
+    repositoryTree: snapshot.tree,
+    repositorySnapshot: snapshot.content
+  };
+
+  const modelResolutions = new Map<
+    string,
+    {
+      nodeId: string;
+      requested: RunModelConfig;
+      resolved: RunModelConfig;
+      fallback?: { fromModelId: string; toModelId: string; reason: string };
+    }
+  >();
+
+  const maxSteps = parseOptionalInt(graph.graphAttrs.max_steps ?? graph.graphAttrs.maxSteps) ?? 1000;
+  const execution = await executeGraph({
+    graph,
+    initialState,
+    ...(args.checkpoint?.currentNodeId ? { startNodeId: args.checkpoint.currentNodeId } : {}),
+    maxSteps,
+    callbacks: {
+      codergen: async ({ node, prompt, state }) => {
+        await assertRunNotCanceled(args.runId);
+        const requested = nodeModelConfig(args.modelConfig, node);
+        const result = await runCodergen(prompt, args.runId, requested, `Node.${node.id}.`);
+        modelResolutions.set(node.id, {
+          nodeId: node.id,
+          requested,
+          resolved: result.modelConfig,
+          ...(result.fallback ? { fallback: result.fallback } : {})
+        });
+        if (result.fallback) {
+          await appendRunEvent(args.runId, "ModelFallbackApplied", {
+            runId: args.runId,
+            nodeId: node.id,
+            provider: result.modelConfig.provider,
+            fromModelId: result.fallback.fromModelId,
+            toModelId: result.fallback.toModelId,
+            reason: result.fallback.reason
+          });
+        }
+        return result.text;
+      },
+      tool: async ({ node }) => {
+        await appendRunEvent(args.runId, "TaskToolNodeExecuted", {
+          runId: args.runId,
+          nodeId: node.id,
+          tool: node.attrs.tool ?? null
+        });
+        return node.attrs.output ?? `Tool node ${node.id} executed`;
+      },
+      waitForHuman: async (question) =>
+        waitForHumanQuestion({
+          runId: args.runId,
+          nodeId: question.nodeId,
+          prompt: question.prompt,
+          options: question.options,
+          timeoutMs: question.timeoutMs
+        }),
+      onEvent: async (event) => {
+        await appendRunEvent(args.runId, `Engine${event.type}`, {
+          runId: args.runId,
+          ...(event.nodeId ? { nodeId: event.nodeId } : {}),
+          ...(event.payload !== undefined ? { payload: event.payload } : {})
+        });
+      },
+      saveCheckpoint: async (nodeId, state) => {
+        await prisma.runCheckpoint.upsert({
+          where: { runId: args.runId },
+          update: {
+            currentNodeId: nodeId,
+            contextJson: state as never
+          },
+          create: {
+            runId: args.runId,
+            currentNodeId: nodeId,
+            contextJson: state as never
+          }
+        });
+      },
+      saveOutcome: async (nodeId, status, payload, attempt) => {
+        await prisma.runNodeOutcome.create({
+          data: {
+            runId: args.runId,
+            nodeId,
+            status,
+            attempt,
+            payload: payload as never
+          }
+        });
+      }
+    }
+  });
+
+  const finalNodeId = selectFinalOutputNodeId(graph, execution.state);
+  const outputText = finalNodeId ? execution.state.nodeOutputs[finalNodeId] ?? "" : "";
+  const artifactKey =
+    (graph.graphAttrs.final_artifact_key ?? graph.graphAttrs.finalArtifactKey ?? "task-report.md").trim() ||
+    "task-report.md";
+
+  const report = renderTaskReport({
+    output: outputText,
+    runId: args.runId,
+    repoFullName: args.repoFullName,
+    sourceBranch: args.sourceBranch,
+    exitNodeId: execution.exitNodeId,
+    finalNodeId,
+    modelResolutions: [...modelResolutions.values()]
+  });
+
+  const artifactPath = `runs/${args.projectId}/${args.runId}/${artifactKey}`;
+  await prisma.artifact.deleteMany({
+    where: {
+      runId: args.runId
+    }
+  });
+  await putObject(artifactPath, report, "text/markdown");
+  await prisma.artifact.create({
+    data: {
+      runId: args.runId,
+      key: artifactKey,
+      path: artifactPath,
+      contentType: "text/markdown",
+      sizeBytes: Buffer.byteLength(report, "utf8")
+    }
+  });
+
+  await appendRunEvent(args.runId, "TaskArtifactWritten", {
+    runId: args.runId,
+    artifactKey,
+    artifactPath,
+    finalNodeId,
+    exitNodeId: execution.exitNodeId
+  });
+
+  return {
+    artifactKey,
+    artifactPath,
+    exitNodeId: execution.exitNodeId,
+    finalNodeId
+  };
+}
+
 async function processRun(spec: RunExecutionSpec): Promise<void> {
   const environment = parseEnvironmentSpec(spec);
   const run = await prisma.run.findUnique({
@@ -423,7 +1069,8 @@ async function processRun(spec: RunExecutionSpec): Promise<void> {
     include: {
       project: true,
       attractorDef: true,
-      referencedSpecBundle: true
+      referencedSpecBundle: true,
+      checkpoint: true
     }
   });
 
@@ -455,21 +1102,49 @@ async function processRun(spec: RunExecutionSpec): Promise<void> {
     throw new Error("Project repository is not connected");
   }
 
-  const canceled = await redis.get(runCancelKey(run.id));
-  if (canceled) {
-    throw new Error("Run canceled before execution started");
-  }
-
-  const repoPath = checkoutRepository(run.id, run.project.repoFullName, run.sourceBranch);
-  const workDir = await repoPath;
+  await assertRunNotCanceled(run.id);
+  const workDir = await checkoutRepository(run.id, run.project.repoFullName, run.sourceBranch);
 
   try {
-    let attractorContent = "";
     const attractorFile = join(workDir, run.attractorDef.repoPath);
-    try {
-      attractorContent = readFileSync(attractorFile, "utf8");
-    } catch {
-      attractorContent = `Attractor file not found at ${run.attractorDef.repoPath}`;
+    const attractorContent = readFileSync(attractorFile, "utf8");
+
+    if (run.runType === RunType.task) {
+      const taskResult = await processTaskRun({
+        runId: run.id,
+        projectId: run.projectId,
+        repoFullName: run.project.repoFullName,
+        sourceBranch: run.sourceBranch,
+        targetBranch: run.targetBranch,
+        workDir,
+        attractorContent,
+        modelConfig: spec.modelConfig,
+        checkpoint: run.checkpoint
+          ? {
+              currentNodeId: run.checkpoint.currentNodeId,
+              contextJson: run.checkpoint.contextJson
+            }
+          : null
+      });
+
+      await prisma.run.update({
+        where: { id: run.id },
+        data: {
+          status: RunStatus.SUCCEEDED,
+          finishedAt: new Date(),
+          prUrl: null
+        }
+      });
+
+      await appendRunEvent(run.id, "RunCompleted", {
+        runId: run.id,
+        status: "SUCCEEDED",
+        artifactKey: taskResult.artifactKey,
+        artifactPath: taskResult.artifactPath,
+        exitNodeId: taskResult.exitNodeId,
+        finalNodeId: taskResult.finalNodeId
+      });
+      return;
     }
 
     if (run.runType === RunType.planning) {
@@ -482,13 +1157,23 @@ async function processRun(spec: RunExecutionSpec): Promise<void> {
         attractorContent
       ].join("\n\n");
 
-      const planText = await runCodergen(planPrompt, spec, run.id);
+      const planResult = await runCodergen(planPrompt, run.id, spec.modelConfig);
+      if (planResult.fallback) {
+        await appendRunEvent(run.id, "ModelFallbackApplied", {
+          runId: run.id,
+          provider: planResult.modelConfig.provider,
+          fromModelId: planResult.fallback.fromModelId,
+          toModelId: planResult.fallback.toModelId,
+          reason: planResult.fallback.reason
+        });
+      }
+
       const bundle = await createSpecBundle(
         run.id,
         run.projectId,
         run.sourceBranch,
         run.project.repoFullName,
-        planText
+        planResult.text
       );
 
       await prisma.run.update({
@@ -534,7 +1219,21 @@ async function processRun(spec: RunExecutionSpec): Promise<void> {
       planText
     ].join("\n\n");
 
-    const implementationText = await runCodergen(implementPrompt, spec, run.id);
+    const implementationResult = await runCodergen(
+      implementPrompt,
+      run.id,
+      spec.modelConfig
+    );
+    if (implementationResult.fallback) {
+      await appendRunEvent(run.id, "ModelFallbackApplied", {
+        runId: run.id,
+        provider: implementationResult.modelConfig.provider,
+        fromModelId: implementationResult.fallback.fromModelId,
+        toModelId: implementationResult.fallback.toModelId,
+        reason: implementationResult.fallback.reason
+      });
+    }
+    const implementationText = implementationResult.text;
 
     await runCommand("git", ["checkout", "-B", run.targetBranch], workDir);
 

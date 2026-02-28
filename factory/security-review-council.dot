@@ -1,0 +1,112 @@
+digraph security_review_council {
+  graph [
+    goal="Global multi-model security review council",
+    final_artifact_key="security-review-report.md",
+    final_output_node="synthesis"
+  ]
+
+  start [shape=Mdiamond, label="Start", type="start"]
+
+  fanout [
+    shape=component,
+    type="parallel",
+    label="Parallel Security Council",
+    prompt="Run all reviewer nodes independently in parallel."
+  ]
+
+  reviewer_gpt53 [
+    shape=box,
+    type="codergen",
+    provider="openrouter",
+    model="openai/gpt-5.3-codex",
+    reasoning="high",
+    label="Reviewer: GPT-5.3 Codex",
+    prompt="You are an independent senior application security reviewer. Analyze the entire repository snapshot in workflow state. Produce a concise markdown report with: (1) critical vulnerabilities, (2) exploitability, (3) concrete file-level remediation guidance, (4) residual risk. Do not reference other reviewers."
+  ]
+
+  reviewer_gemini [
+    shape=box,
+    type="codergen",
+    provider="openrouter",
+    model="google/gemini-3.1-pro-preview",
+    reasoning="high",
+    label="Reviewer: Gemini 3.1 Pro",
+    prompt="You are an independent senior application security reviewer. Analyze the entire repository snapshot in workflow state. Produce a concise markdown report with: (1) critical vulnerabilities, (2) exploitability, (3) concrete file-level remediation guidance, (4) residual risk. Do not reference other reviewers."
+  ]
+
+  reviewer_sonnet [
+    shape=box,
+    type="codergen",
+    provider="openrouter",
+    model="anthropic/claude-sonnet-4.6",
+    reasoning="high",
+    label="Reviewer: Claude Sonnet 4.6",
+    prompt="You are an independent senior application security reviewer. Analyze the entire repository snapshot in workflow state. Produce a concise markdown report with: (1) critical vulnerabilities, (2) exploitability, (3) concrete file-level remediation guidance, (4) residual risk. Do not reference other reviewers."
+  ]
+
+  reviewer_opus [
+    shape=box,
+    type="codergen",
+    provider="openrouter",
+    model="anthropic/claude-opus-4.5",
+    reasoning="high",
+    label="Reviewer: Claude Opus 4.5",
+    prompt="You are an independent senior application security reviewer. Analyze the entire repository snapshot in workflow state. Produce a concise markdown report with: (1) critical vulnerabilities, (2) exploitability, (3) concrete file-level remediation guidance, (4) residual risk. Do not reference other reviewers."
+  ]
+
+  reviewer_glm [
+    shape=box,
+    type="codergen",
+    provider="openrouter",
+    model="z-ai/glm-5",
+    reasoning="high",
+    label="Reviewer: GLM-5",
+    prompt="You are an independent senior application security reviewer. Analyze the entire repository snapshot in workflow state. Produce a concise markdown report with: (1) critical vulnerabilities, (2) exploitability, (3) concrete file-level remediation guidance, (4) residual risk. Do not reference other reviewers."
+  ]
+
+  reviewer_kimi [
+    shape=box,
+    type="codergen",
+    provider="openrouter",
+    model="moonshotai/kimi-k2.5",
+    reasoning="high",
+    label="Reviewer: Kimi K2.5",
+    prompt="You are an independent senior application security reviewer. Analyze the entire repository snapshot in workflow state. Produce a concise markdown report with: (1) critical vulnerabilities, (2) exploitability, (3) concrete file-level remediation guidance, (4) residual risk. Do not reference other reviewers."
+  ]
+
+  fan_in [
+    shape=tripleoctagon,
+    type="parallel.fan_in",
+    label="Council Fan-In"
+  ]
+
+  synthesis [
+    shape=box,
+    type="codergen",
+    provider="openrouter",
+    model="google/gemini-3.1-pro-preview",
+    reasoning="high",
+    label="Synthesis: Gemini 3.1 Pro",
+    prompt="You are a fresh synthesis reviewer. Read all parallel reviewer outputs from workflow state (parallelOutputs). Combine them into one final markdown report with: Executive Summary, Confirmed Findings (severity, evidence, impacted files), Divergent Opinions, Remediation Plan (ordered), Verification Checklist, Residual Risk. Be explicit when reviewers disagree."
+  ]
+
+  done [shape=Msquare, label="Done", type="exit"]
+
+  start -> fanout
+  fanout -> reviewer_gpt53 [label="gpt53"]
+  fanout -> reviewer_gemini [label="gemini"]
+  fanout -> reviewer_sonnet [label="sonnet"]
+  fanout -> reviewer_opus [label="opus"]
+  fanout -> reviewer_glm [label="glm"]
+  fanout -> reviewer_kimi [label="kimi"]
+
+  reviewer_gpt53 -> fan_in
+  reviewer_gemini -> fan_in
+  reviewer_sonnet -> fan_in
+  reviewer_opus -> fan_in
+  reviewer_glm -> fan_in
+  reviewer_kimi -> fan_in
+
+  fan_in -> synthesis
+  synthesis -> done
+}

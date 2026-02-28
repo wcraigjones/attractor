@@ -1,4 +1,4 @@
-export type RunType = "planning" | "implementation";
+export type RunType = "planning" | "implementation" | "task";
 
 export type RunStatus =
   | "QUEUED"
@@ -92,6 +92,20 @@ export interface Run {
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
+}
+
+export type RunQuestionStatus = "PENDING" | "ANSWERED" | "TIMEOUT";
+
+export interface RunQuestion {
+  id: string;
+  runId: string;
+  nodeId: string;
+  prompt: string;
+  options: unknown | null;
+  answer: unknown | null;
+  status: RunQuestionStatus;
+  createdAt: string;
+  answeredAt: string | null;
 }
 
 export interface SpecBundle {

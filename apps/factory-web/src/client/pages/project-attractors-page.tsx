@@ -32,7 +32,7 @@ export function ProjectAttractorsPage() {
 
   const [name, setName] = useState("");
   const [repoPath, setRepoPath] = useState("factory/self-bootstrap.dot");
-  const [defaultRunType, setDefaultRunType] = useState<"planning" | "implementation">("planning");
+  const [defaultRunType, setDefaultRunType] = useState<"planning" | "implementation" | "task">("planning");
   const [description, setDescription] = useState("");
 
   const attractorsQuery = useQuery({
@@ -148,13 +148,14 @@ export function ProjectAttractorsPage() {
               </div>
               <div className="space-y-1">
                 <Label>Default Run Type</Label>
-                <Select value={defaultRunType} onValueChange={(value: "planning" | "implementation") => setDefaultRunType(value)}>
+                <Select value={defaultRunType} onValueChange={(value: "planning" | "implementation" | "task") => setDefaultRunType(value)}>
                   <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="planning">planning</SelectItem>
                     <SelectItem value="implementation">implementation</SelectItem>
+                    <SelectItem value="task">task</SelectItem>
                   </SelectContent>
                 </Select>
               </div>

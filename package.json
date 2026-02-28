@@ -41,7 +41,8 @@
     "set:provider-secret": "./scripts/set-provider-secret.sh",
     "bootstrap:self": "./scripts/bootstrap-self.sh",
     "self:iterate": "./scripts/self-iterate.sh",
-    "self:cycle": "./scripts/self-cycle.sh"
+    "self:cycle": "./scripts/self-cycle.sh",
+    "attractor:security-council": "./scripts/upsert-security-review-council.sh"
   },
   "engines": {
     "node": ">=20.0.0"
@@ -57,7 +58,7 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.888.0",
     "@kubernetes/client-node": "^1.4.0",
-    "@mariozechner/pi-ai": "0.54.2",
+    "@mariozechner/pi-ai": "^0.55.3",
     "@octokit/app": "^16.1.2",
     "@octokit/rest": "^22.0.0",
     "@prisma/client": "^6.16.2",

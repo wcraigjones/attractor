@@ -120,7 +120,7 @@ export function ProjectRunsPage() {
           : {}),
         runType,
         sourceBranch,
-        targetBranch,
+        targetBranch: runType === "task" ? sourceBranch : targetBranch,
         ...(runType === "implementation" && specBundleId.trim().length > 0
           ? { specBundleId: specBundleId.trim() }
           : {}),
@@ -210,7 +210,8 @@ export function ProjectRunsPage() {
                   {[
                     { label: "all", value: "all" },
                     { label: "planning", value: "planning" },
-                    { label: "implementation", value: "implementation" }
+                    { label: "implementation", value: "implementation" },
+                    { label: "task", value: "task" }
                   ].map((item) => (
                     <SelectItem key={item.value} value={item.value}>
                       {item.label}
@@ -310,6 +311,7 @@ export function ProjectRunsPage() {
                   <SelectContent>
                     <SelectItem value="planning">planning</SelectItem>
                     <SelectItem value="implementation">implementation</SelectItem>
+                    <SelectItem value="task">task</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -395,10 +397,12 @@ export function ProjectRunsPage() {
                 <Label>Source Branch</Label>
                 <Input value={sourceBranch} onChange={(event) => setSourceBranch(event.target.value)} />
               </div>
-              <div className="space-y-1">
-                <Label>Target Branch</Label>
-                <Input value={targetBranch} onChange={(event) => setTargetBranch(event.target.value)} />
-              </div>
+              {runType === "task" ? null : (
+                <div className="space-y-1">
+                  <Label>Target Branch</Label>
+                  <Input value={targetBranch} onChange={(event) => setTargetBranch(event.target.value)} />
+                </div>
+              )}
               {runType === "implementation" ? (
                 <div className="space-y-1">
                   <Label>Spec Bundle ID</Label>

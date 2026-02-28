@@ -1,7 +1,8 @@
-export type RunType = "planning" | "implementation";
+export type RunType = "planning" | "implementation" | "task";
 export type RunStatus = "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELED" | "TIMEOUT";
 export type AttractorScope = "PROJECT" | "GLOBAL";
 export type EnvironmentKind = "KUBERNETES_JOB";
+export type RunQuestionStatus = "PENDING" | "ANSWERED" | "TIMEOUT";
 
 export interface EnvironmentResources {
   requests?: {
@@ -117,6 +118,18 @@ export interface Run {
   startedAt: string | null;
   finishedAt: string | null;
   events?: RunEvent[];
+}
+
+export interface RunQuestion {
+  id: string;
+  runId: string;
+  nodeId: string;
+  prompt: string;
+  options: unknown | null;
+  answer: unknown | null;
+  status: RunQuestionStatus;
+  createdAt: string;
+  answeredAt: string | null;
 }
 
 export type ReviewDecision = "APPROVE" | "REQUEST_CHANGES" | "REJECT" | "EXCEPTION";

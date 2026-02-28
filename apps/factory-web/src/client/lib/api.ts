@@ -10,6 +10,7 @@ import type {
   ProjectSecret,
   ProviderSchema,
   Run,
+  RunQuestion,
   RunReviewChecklist,
   RunReviewResponse,
   RunModelConfig,
@@ -206,7 +207,7 @@ export async function listGlobalAttractors(): Promise<GlobalAttractor[]> {
 export async function upsertGlobalAttractor(input: {
   name: string;
   repoPath: string;
-  defaultRunType: "planning" | "implementation";
+  defaultRunType: "planning" | "implementation" | "task";
   description?: string;
   active?: boolean;
 }): Promise<GlobalAttractor> {
@@ -221,7 +222,7 @@ export async function createAttractor(
   input: {
     name: string;
     repoPath: string;
-    defaultRunType: "planning" | "implementation";
+    defaultRunType: "planning" | "implementation" | "task";
     description?: string;
     active?: boolean;
   }
@@ -241,7 +242,7 @@ export async function createRun(input: {
   projectId: string;
   attractorDefId: string;
   environmentId?: string;
-  runType: "planning" | "implementation";
+  runType: "planning" | "implementation" | "task";
   sourceBranch: string;
   targetBranch: string;
   specBundleId?: string;
@@ -260,6 +261,22 @@ export async function getRun(runId: string): Promise<Run> {
 export async function cancelRun(runId: string): Promise<{ runId: string; status: string }> {
   return apiRequest<{ runId: string; status: string }>(`/api/runs/${runId}/cancel`, {
     method: "POST"
+  });
+}
+
+export async function getRunQuestions(runId: string): Promise<RunQuestion[]> {
+  const payload = await apiRequest<{ questions: RunQuestion[] }>(`/api/runs/${runId}/questions`);
+  return payload.questions;
+}
+
+export async function answerRunQuestion(
+  runId: string,
+  questionId: string,
+  input: { answer: string }
+): Promise<{ question: RunQuestion }> {
+  return apiRequest<{ question: RunQuestion }>(`/api/runs/${runId}/questions/${questionId}/answer`, {
+    method: "POST",
+    body: JSON.stringify(input)
   });
 }
 

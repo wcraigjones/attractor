@@ -2,7 +2,15 @@ import express from "express";
 import { Readable } from "node:stream";
 import { KubeConfig, CoreV1Api } from "@kubernetes/client-node";
 import { App as GitHubApp } from "@octokit/app";
-import { AttractorScope, EnvironmentKind, PrismaClient, ReviewDecision, RunStatus, RunType } from "@prisma/client";
+import {
+  AttractorScope,
+  EnvironmentKind,
+  PrismaClient,
+  ReviewDecision,
+  RunQuestionStatus,
+  RunStatus,
+  RunType
+} from "@prisma/client";
 import { Redis } from "ioredis";
 import { getModels, getProviders } from "@mariozechner/pi-ai";
 import { GetObjectCommand, HeadObjectCommand, S3Client } from "@aws-sdk/client-s3";
@@ -1013,7 +1021,7 @@ app.get("/api/projects/:projectId/secrets", async (req, res) => {
 const createAttractorSchema = z.object({
   name: z.string().min(1),
   repoPath: z.string().min(1),
-  defaultRunType: z.enum(["planning", "implementation"]),
+  defaultRunType: z.enum(["planning", "implementation", "task"]),
   description: z.string().optional(),
   active: z.boolean().optional()
 });
@@ -1097,7 +1105,7 @@ const createRunSchema = z.object({
   projectId: z.string().min(1),
   attractorDefId: z.string().min(1),
   environmentId: z.string().min(1).optional(),
-  runType: z.enum(["planning", "implementation"]),
+  runType: z.enum(["planning", "implementation", "task"]),
   sourceBranch: z.string().min(1),
   targetBranch: z.string().min(1),
   specBundleId: z.string().optional(),
@@ -1147,6 +1155,10 @@ app.post("/api/runs", async (req, res) => {
 
   if (input.data.runType === "planning" && input.data.specBundleId) {
     return sendError(res, 400, "planning runs must not set specBundleId");
+  }
+
+  if (input.data.runType === "task" && input.data.specBundleId) {
+    return sendError(res, 400, "task runs must not set specBundleId");
   }
 
   if (input.data.runType === "implementation" && !input.data.specBundleId) {
@@ -1395,6 +1407,60 @@ app.get("/api/runs/:runId", async (req, res) => {
     return sendError(res, 404, "run not found");
   }
   res.json(run);
+});
+
+app.get("/api/runs/:runId/questions", async (req, res) => {
+  const run = await prisma.run.findUnique({ where: { id: req.params.runId } });
+  if (!run) {
+    return sendError(res, 404, "run not found");
+  }
+
+  const questions = await prisma.runQuestion.findMany({
+    where: { runId: run.id },
+    orderBy: { createdAt: "asc" }
+  });
+
+  res.json({ questions });
+});
+
+const answerRunQuestionSchema = z.object({
+  answer: z.string().min(1)
+});
+
+app.post("/api/runs/:runId/questions/:questionId/answer", async (req, res) => {
+  const input = answerRunQuestionSchema.safeParse(req.body);
+  if (!input.success) {
+    return sendError(res, 400, input.error.message);
+  }
+
+  const run = await prisma.run.findUnique({ where: { id: req.params.runId } });
+  if (!run) {
+    return sendError(res, 404, "run not found");
+  }
+
+  const question = await prisma.runQuestion.findFirst({
+    where: {
+      id: req.params.questionId,
+      runId: run.id
+    }
+  });
+  if (!question) {
+    return sendError(res, 404, "question not found for run");
+  }
+  if (question.status !== RunQuestionStatus.PENDING) {
+    return sendError(res, 409, "question is not pending");
+  }
+
+  const updated = await prisma.runQuestion.update({
+    where: { id: question.id },
+    data: {
+      answer: { text: input.data.answer },
+      status: RunQuestionStatus.ANSWERED,
+      answeredAt: new Date()
+    }
+  });
+
+  res.json({ question: updated });
 });
 
 app.get("/api/runs/:runId/events", async (req, res) => {

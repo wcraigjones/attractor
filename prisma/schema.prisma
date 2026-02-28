@@ -10,6 +10,7 @@ datasource db {
 enum RunType {
   planning
   implementation
+  task
 }
 
 enum EnvironmentKind {
@@ -35,6 +36,12 @@ enum ReviewDecision {
 enum AttractorScope {
   PROJECT
   GLOBAL
+}
+
+enum RunQuestionStatus {
+  PENDING
+  ANSWERED
+  TIMEOUT
 }
 
 model Project {
@@ -129,6 +136,9 @@ model Run {
   events        RunEvent[]
   artifacts     Artifact[]
   review        RunReview?
+  checkpoint    RunCheckpoint?
+  nodeOutcomes  RunNodeOutcome[]
+  questions     RunQuestion[]
   producedSpecBundle SpecBundle? @relation("ProducedSpecBundle")
   referencedSpecBundle SpecBundle? @relation("ReferencedSpecBundle", fields: [specBundleId], references: [id], onDelete: SetNull)
 
@@ -202,4 +212,42 @@ model RunEvent {
   run     Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
 
   @@index([runId, ts])
+}
+
+model RunCheckpoint {
+  id            String   @id @default(cuid())
+  runId         String   @unique
+  currentNodeId String
+  contextJson   Json
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  run           Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+}
+
+model RunNodeOutcome {
+  id        String   @id @default(cuid())
+  runId     String
+  nodeId    String
+  status    String
+  attempt   Int
+  payload   Json
+  createdAt DateTime @default(now())
+  run       Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId, nodeId])
+}
+
+model RunQuestion {
+  id         String            @id @default(cuid())
+  runId      String
+  nodeId     String
+  prompt     String
+  options    Json?
+  answer     Json?
+  status     RunQuestionStatus @default(PENDING)
+  createdAt  DateTime          @default(now())
+  answeredAt DateTime?
+  run        Run               @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId, status, createdAt])
 }

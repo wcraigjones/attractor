@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 
@@ -19,6 +19,7 @@ const primaryNav = [
   { to: "/", label: "Dashboard" },
   { to: "/projects", label: "Projects" }
 ];
+const SCOPE_STORAGE_KEY = "factory.selectedScope";
 
 function toTitleCase(value: string): string {
   return value
@@ -34,6 +35,14 @@ export function AppShell() {
   const params = useParams<{ projectId?: string; runId?: string }>();
   const projectIdFromPath = params.projectId;
   const runIdFromPath = params.runId;
+  const [persistedScope, setPersistedScope] = useState<string | undefined>(() => {
+    if (typeof window === "undefined") {
+      return undefined;
+    }
+    const value = window.localStorage.getItem(SCOPE_STORAGE_KEY);
+    const normalized = value?.trim();
+    return normalized && normalized.length > 0 ? normalized : undefined;
+  });
 
   const projectsQuery = useQuery({
     queryKey: ["projects"],
@@ -46,15 +55,35 @@ export function AppShell() {
   });
 
   const scopeOptions = useMemo(() => buildScopeOptions(projectsQuery.data ?? []), [projectsQuery.data]);
+  const validPersistedScope = useMemo(() => {
+    if (!persistedScope) {
+      return undefined;
+    }
+    if (persistedScope === GLOBAL_SCOPE_VALUE) {
+      return persistedScope;
+    }
+    return projectsQuery.data?.some((project) => project.id === persistedScope) ? persistedScope : undefined;
+  }, [persistedScope, projectsQuery.data]);
   const selectedScope = resolveSelectedScope({
     pathname: location.pathname,
     projectIdFromPath,
     fallbackProjectId:
       runContextQuery.data?.projectId ??
+      validPersistedScope ??
       (runIdFromPath && runContextQuery.isLoading ? undefined : projectsQuery.data?.[0]?.id)
   });
   const selectedProjectId = selectedScope === GLOBAL_SCOPE_VALUE ? undefined : selectedScope;
   const globalScopeSelected = selectedScope === GLOBAL_SCOPE_VALUE;
+
+  useEffect(() => {
+    if (!selectedScope || typeof window === "undefined") {
+      return;
+    }
+    if (persistedScope !== selectedScope) {
+      setPersistedScope(selectedScope);
+    }
+    window.localStorage.setItem(SCOPE_STORAGE_KEY, selectedScope);
+  }, [persistedScope, selectedScope]);
 
   const breadcrumbs = useMemo(() => {
     const parts = location.pathname.split("/").filter(Boolean);

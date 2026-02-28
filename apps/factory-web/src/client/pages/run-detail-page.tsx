@@ -4,14 +4,16 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import {
+  answerRunQuestion,
   buildApiUrl,
   cancelRun,
   getRun,
   getRunArtifacts,
+  getRunQuestions,
   getRunReview,
   upsertRunReview
 } from "../lib/api";
-import type { ReviewDecision, RunEvent, RunReviewChecklist } from "../lib/types";
+import type { ReviewDecision, RunEvent, RunQuestion, RunReviewChecklist } from "../lib/types";
 import { PageTitle } from "../components/layout/page-title";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
@@ -104,6 +106,7 @@ export function RunDetailPage() {
   const [streamEvents, setStreamEvents] = useState<RunEvent[]>([]);
   const [reviewForm, setReviewForm] = useState<ReviewFormState>(emptyReviewForm());
   const [reviewFormInitialized, setReviewFormInitialized] = useState(false);
+  const [questionAnswers, setQuestionAnswers] = useState<Record<string, string>>({});
 
   const runQuery = useQuery({
     queryKey: ["run", runId],
@@ -117,6 +120,13 @@ export function RunDetailPage() {
     queryFn: () => getRunArtifacts(runId),
     enabled: runId.length > 0,
     refetchInterval: 7000
+  });
+
+  const questionsQuery = useQuery({
+    queryKey: ["run-questions", runId],
+    queryFn: () => getRunQuestions(runId),
+    enabled: runId.length > 0,
+    refetchInterval: runQuery.data?.status === "RUNNING" ? 4000 : false
   });
 
   const reviewQuery = useQuery({
@@ -169,6 +179,23 @@ export function RunDetailPage() {
     }
   });
 
+  const answerQuestionMutation = useMutation({
+    mutationFn: (input: { questionId: string; answer: string }) =>
+      answerRunQuestion(runId, input.questionId, { answer: input.answer }),
+    onSuccess: (_payload, variables) => {
+      toast.success("Answer submitted");
+      setQuestionAnswers((previous) => ({
+        ...previous,
+        [variables.questionId]: ""
+      }));
+      void queryClient.invalidateQueries({ queryKey: ["run-questions", runId] });
+      void queryClient.invalidateQueries({ queryKey: ["run", runId] });
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : String(error));
+    }
+  });
+
   const tab = searchParams.get("tab") ?? "overview";
 
   useEffect(() => {
@@ -203,6 +230,7 @@ export function RunDetailPage() {
   useEffect(() => {
     setReviewForm(emptyReviewForm());
     setReviewFormInitialized(false);
+    setQuestionAnswers({});
   }, [runId]);
 
   useEffect(() => {
@@ -240,6 +268,21 @@ export function RunDetailPage() {
     }
     return [...byId.values()].sort((a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime());
   }, [runQuery.data?.events, streamEvents]);
+
+  const taskReportArtifact = useMemo(() => {
+    const artifacts = artifactsQuery.data?.artifacts ?? [];
+    return (
+      artifacts.find((artifact) => artifact.key === "security-review-report.md") ??
+      artifacts.find((artifact) => artifact.key.endsWith(".md")) ??
+      artifacts[0] ??
+      null
+    );
+  }, [artifactsQuery.data?.artifacts]);
+
+  const pendingQuestions = useMemo(
+    () => (questionsQuery.data ?? []).filter((question) => question.status === "PENDING"),
+    [questionsQuery.data]
+  );
 
   if (!runQuery.data) {
     return <p className="text-sm text-muted-foreground">Loading run...</p>;
@@ -353,6 +396,84 @@ export function RunDetailPage() {
               ) : null}
             </CardContent>
           </Card>
+
+          {run.runType === "task" ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>Task Artifact</CardTitle>
+                <CardDescription>Artifact-only runs produce a final report without code commits or PR creation.</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-2 text-sm">
+                {taskReportArtifact ? (
+                  <>
+                    <p>
+                      <span className="text-muted-foreground">Primary artifact:</span>{" "}
+                      <span className="mono">{taskReportArtifact.key}</span>
+                    </p>
+                    <p>
+                      <span className="text-muted-foreground">Path:</span>{" "}
+                      <span className="mono text-xs">{taskReportArtifact.path}</span>
+                    </p>
+                    <Button asChild size="sm" variant="outline">
+                      <Link to={`/runs/${run.id}/artifacts/${taskReportArtifact.id}`}>Open Report</Link>
+                    </Button>
+                  </>
+                ) : (
+                  <p className="text-muted-foreground">No report artifact available yet.</p>
+                )}
+              </CardContent>
+            </Card>
+          ) : null}
+
+          {run.runType === "task" ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>Human Input</CardTitle>
+                <CardDescription>Submit answers when the workflow is paused on wait.human nodes.</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {pendingQuestions.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No pending prompts for this run.</p>
+                ) : (
+                  pendingQuestions.map((question: RunQuestion) => (
+                    <div key={question.id} className="space-y-2 rounded-md border border-border p-3">
+                      <p className="text-sm font-medium">{question.prompt}</p>
+                      {Array.isArray(question.options) && question.options.length > 0 ? (
+                        <p className="text-xs text-muted-foreground">
+                          Options: {question.options.join(" | ")}
+                        </p>
+                      ) : null}
+                      <Textarea
+                        value={questionAnswers[question.id] ?? ""}
+                        onChange={(event) => {
+                          const value = event.target.value;
+                          setQuestionAnswers((previous) => ({
+                            ...previous,
+                            [question.id]: value
+                          }));
+                        }}
+                        placeholder="Type your answer"
+                      />
+                      <Button
+                        size="sm"
+                        onClick={() => {
+                          const answer = (questionAnswers[question.id] ?? "").trim();
+                          if (!answer) {
+                            toast.error("Answer is required");
+                            return;
+                          }
+                          answerQuestionMutation.mutate({ questionId: question.id, answer });
+                        }}
+                        disabled={answerQuestionMutation.isPending}
+                      >
+                        Submit Answer
+                      </Button>
+                    </div>
+                  ))
+                )}
+              </CardContent>
+            </Card>
+          ) : null}
         </div>
       ) : null}
 
