@@ -82,6 +82,9 @@ export interface Run {
   id: string;
   projectId: string;
   attractorDefId: string;
+  attractorContentPath: string | null;
+  attractorContentVersion: number | null;
+  attractorContentSha256: string | null;
   githubIssueId: string | null;
   githubPullRequestId: string | null;
   environmentId: string | null;

@@ -2,6 +2,7 @@ import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, wr
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 
 import {
@@ -605,15 +606,49 @@ async function checkoutRepository(runId: string, repoFullName: string, sourceBra
   return workDir;
 }
 
+function digestText(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
 async function loadAttractorContent(args: {
   workDir: string;
+  snapshot: {
+    contentPath: string | null;
+    contentVersion: number | null;
+    contentSha256: string | null;
+  };
   attractor: {
     name: string;
     repoPath: string | null;
     contentPath: string | null;
     contentVersion: number;
   };
-}): Promise<{ content: string; source: "storage" | "repo"; path: string }> {
+}): Promise<{ content: string; source: "snapshot" | "storage" | "repo"; path: string }> {
+  if (args.snapshot.contentPath) {
+    try {
+      const content = await getObjectString(args.snapshot.contentPath);
+      if (args.snapshot.contentSha256) {
+        const actualDigest = digestText(content);
+        if (actualDigest !== args.snapshot.contentSha256) {
+          throw new Error(
+            `Attractor snapshot hash mismatch: expected ${args.snapshot.contentSha256}, got ${actualDigest}`
+          );
+        }
+      }
+      return {
+        content,
+        source: "snapshot",
+        path: args.snapshot.contentPath
+      };
+    } catch (error) {
+      throw new Error(
+        `Failed to load attractor snapshot from ${args.snapshot.contentPath}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
   if (args.attractor.contentPath) {
     try {
       const content = await getObjectString(args.attractor.contentPath);
@@ -1374,6 +1409,11 @@ async function processRun(spec: RunExecutionSpec): Promise<void> {
   try {
     const attractorResolved = await loadAttractorContent({
       workDir,
+      snapshot: {
+        contentPath: run.attractorContentPath,
+        contentVersion: run.attractorContentVersion,
+        contentSha256: run.attractorContentSha256
+      },
       attractor: {
         name: run.attractorDef.name,
         repoPath: run.attractorDef.repoPath,
@@ -1388,7 +1428,7 @@ async function processRun(spec: RunExecutionSpec): Promise<void> {
       attractorDefId: run.attractorDefId,
       source: attractorResolved.source,
       path: attractorResolved.path,
-      contentVersion: run.attractorDef.contentVersion
+      contentVersion: run.attractorContentVersion ?? run.attractorDef.contentVersion
     });
 
     if (run.runType === RunType.task) {

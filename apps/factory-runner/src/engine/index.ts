@@ -1,21 +1,24 @@
-export { evaluateCondition, validateConditionSyntax } from "./condition.js";
+export {
+  lintDotGraph,
+  parseDotGraph,
+  parseModelStylesheet,
+  serializeDotGraphCanonical,
+  validateConditionSyntax,
+  validateDotGraph
+} from "@attractor/dot-engine";
+export { evaluateCondition } from "./condition.js";
 export { executeGraph } from "./executor.js";
-export { lintDotGraph, parseDotGraph, validateDotGraph } from "./parser.js";
-export { applyModelStylesheet, parseModelStylesheet } from "./stylesheet.js";
+export { applyModelStylesheet } from "./stylesheet.js";
 export { applyGraphTransforms, applyVariableExpansion } from "./transforms.js";
+export type { DotDiagnostic, DotEdge, DotGraph, DotNode, HandlerType } from "@attractor/dot-engine";
 export type {
   CodergenInvocation,
-  DotDiagnostic,
-  DotEdge,
-  DotGraph,
-  DotNode,
   EngineCallbacks,
   EngineEvent,
   EngineState,
   ExecuteGraphInput,
   ExecuteGraphResult,
   HandlerResultLike,
-  HandlerType,
   HumanQuestion,
   NodeOutcome,
   OutcomeStatus,

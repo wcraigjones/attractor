@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 
 import { AppShell } from "./components/layout/app-shell";
 import { ArtifactViewerPage } from "./pages/artifact-viewer-page";
+import { GlobalAttractorStudioPage, ProjectAttractorStudioPage } from "./pages/attractor-studio-page";
 import { DashboardPage } from "./pages/dashboard-page";
 import { GlobalAttractorsPage } from "./pages/global-attractors-page";
 import { GlobalSecretsPage } from "./pages/global-secrets-page";
@@ -24,10 +25,12 @@ export function App() {
         <Route index element={<DashboardPage />} />
         <Route path="projects" element={<ProjectsPage />} />
         <Route path="attractors/global" element={<GlobalAttractorsPage />} />
+        <Route path="attractors/global/:attractorId" element={<GlobalAttractorStudioPage />} />
         <Route path="secrets/global" element={<GlobalSecretsPage />} />
         <Route path="projects/:projectId" element={<ProjectOverviewPage />} />
         <Route path="projects/:projectId/secrets" element={<ProjectSecretsPage />} />
         <Route path="projects/:projectId/attractors" element={<ProjectAttractorsPage />} />
+        <Route path="projects/:projectId/attractors/:attractorId" element={<ProjectAttractorStudioPage />} />
         <Route path="projects/:projectId/github/issues" element={<ProjectGitHubIssuesPage />} />
         <Route path="projects/:projectId/github/issues/:issueNumber" element={<ProjectGitHubIssueDetailPage />} />
         <Route path="projects/:projectId/github/pulls" element={<ProjectGitHubPrQueuePage />} />

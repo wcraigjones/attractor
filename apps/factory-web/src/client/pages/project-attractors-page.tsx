@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
-import { createAttractor, listAttractors } from "../lib/api";
+import { createAttractor, getProjectAttractor, listAttractors } from "../lib/api";
 import { buildProjectAttractorsViewRows, type AttractorRowStatus } from "../lib/attractors-view";
 import { PageTitle } from "../components/layout/page-title";
 import { Badge } from "../components/ui/badge";
@@ -34,6 +34,7 @@ function statusVariant(status: AttractorRowStatus): "default" | "secondary" | "s
 export function ProjectAttractorsPage() {
   const params = useParams<{ projectId: string }>();
   const projectId = params.projectId ?? "";
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
 
   const [name, setName] = useState("");
@@ -70,6 +71,40 @@ export function ProjectAttractorsPage() {
     }
   });
 
+  const duplicateMutation = useMutation({
+    mutationFn: async (input: { attractorId: string }) => {
+      const detail = await getProjectAttractor(projectId, input.attractorId);
+      if (!detail.content) {
+        throw new Error("Cannot duplicate attractor with missing DOT content");
+      }
+
+      const existingNames = new Set((attractorsQuery.data ?? []).map((item) => item.name));
+      const base = `${detail.attractor.name}-copy`;
+      let nextName = base;
+      let suffix = 2;
+      while (existingNames.has(nextName)) {
+        nextName = `${base}-${suffix}`;
+        suffix += 1;
+      }
+
+      return createAttractor(projectId, {
+        name: nextName,
+        content: detail.content,
+        ...(detail.attractor.repoPath ? { repoPath: detail.attractor.repoPath } : {}),
+        defaultRunType: detail.attractor.defaultRunType,
+        ...(detail.attractor.description ? { description: detail.attractor.description } : {}),
+        active: detail.attractor.active
+      });
+    },
+    onSuccess: () => {
+      toast.success("Attractor duplicated");
+      void queryClient.invalidateQueries({ queryKey: ["attractors", projectId] });
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : String(error));
+    }
+  });
+
   return (
     <div>
       <PageTitle title="Project Attractors" description="Project attractors can override global attractors by name." />
@@ -96,6 +131,7 @@ export function ProjectAttractorsPage() {
                   <TableHead>Default Run</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Activity</TableHead>
+                  <TableHead>Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -115,11 +151,47 @@ export function ProjectAttractorsPage() {
                     <TableCell>{attractor.defaultRunType}</TableCell>
                     <TableCell>
                       <Badge variant={statusVariant(attractor.status)}>{attractor.status}</Badge>
+                      {!attractor.storageBacked ? <Badge variant="warning" className="ml-2">Legacy</Badge> : null}
                     </TableCell>
                     <TableCell>
                       <Badge variant={attractor.active ? "success" : "secondary"}>
                         {attractor.active ? "Active" : "Inactive"}
                       </Badge>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex flex-wrap gap-1">
+                        <Button asChild size="sm" variant="outline">
+                          <Link to={`/projects/${projectId}/attractors/${attractor.attractorId}?tab=editor`}>Edit</Link>
+                        </Button>
+                        <Button asChild size="sm" variant="outline">
+                          <Link to={`/projects/${projectId}/attractors/${attractor.attractorId}?tab=viewer`}>View</Link>
+                        </Button>
+                        <Button asChild size="sm" variant="outline">
+                          <Link to={`/projects/${projectId}/attractors/${attractor.attractorId}?tab=viewer&panel=history`}>
+                            History
+                          </Link>
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => {
+                            duplicateMutation.mutate({ attractorId: attractor.attractorId });
+                          }}
+                          disabled={duplicateMutation.isPending}
+                        >
+                          Duplicate
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={!attractor.storageBacked || attractor.status === "Overridden" || !attractor.active}
+                          onClick={() => {
+                            navigate(`/projects/${projectId}/runs?attractorDefId=${attractor.attractorId}`);
+                          }}
+                        >
+                          Run
+                        </Button>
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -128,6 +200,9 @@ export function ProjectAttractorsPage() {
             {effectiveRows.length === 0 ? (
               <p className="mt-3 text-sm text-muted-foreground">No project or global attractors have been configured yet.</p>
             ) : null}
+            <p className="mt-3 text-sm text-muted-foreground">
+              Legacy attractors without storage-backed content are read-only for new runs. Duplicate them to recreate as storage-backed definitions.
+            </p>
           </CardContent>
         </Card>
 

@@ -302,6 +302,11 @@ export function RunDetailPage() {
         actions={
           <>
             <Badge variant={statusVariant(run.status)}>{run.status}</Badge>
+            <Button asChild variant="outline">
+              <Link to={`/projects/${run.projectId}/attractors/${run.attractorDefId}?tab=viewer`}>
+                View Attractor Snapshot
+              </Link>
+            </Button>
             <Button
               variant="outline"
               onClick={() => {
@@ -354,6 +359,18 @@ export function RunDetailPage() {
               </p>
               <p>
                 <span className="text-muted-foreground">Spec bundle:</span> {run.specBundleId ?? "-"}
+              </p>
+              <p>
+                <span className="text-muted-foreground">Attractor snapshot path:</span>{" "}
+                <span className="mono text-xs">{run.attractorContentPath ?? "-"}</span>
+              </p>
+              <p>
+                <span className="text-muted-foreground">Attractor snapshot version:</span>{" "}
+                {run.attractorContentVersion ?? "-"}
+              </p>
+              <p>
+                <span className="text-muted-foreground">Attractor snapshot SHA:</span>{" "}
+                <span className="mono text-xs">{run.attractorContentSha256 ?? "-"}</span>
               </p>
               <p>
                 <span className="text-muted-foreground">Environment:</span> {environmentName}
