@@ -464,7 +464,14 @@ function normalizeEngineState(value: unknown): EngineState | null {
         ? (payload.context as Record<string, unknown>)
         : {},
     nodeOutputs: stringMap(payload.nodeOutputs),
-    parallelOutputs: nestedStringMap(payload.parallelOutputs)
+    parallelOutputs: nestedStringMap(payload.parallelOutputs),
+    nodeOutcomes: {},
+    nodeRetryCounts: {},
+    completedNodes:
+      Array.isArray(payload.completedNodes) &&
+      payload.completedNodes.every((item) => typeof item === "string")
+        ? (payload.completedNodes as string[])
+        : []
   };
 }
 
@@ -882,21 +889,21 @@ async function processTaskRun(args: {
   finalNodeId: string | null;
 }> {
   const parsed = parseDotGraph(args.attractorContent);
-  validateDotGraph(parsed);
-  const graph = applyGraphTransforms(parsed);
-
-  const stylesheetConfig = graph.graphAttrs.model_stylesheet ?? graph.graphAttrs.modelStylesheet;
+  const stylesheetConfig = parsed.graphAttrs.model_stylesheet ?? parsed.graphAttrs.modelStylesheet;
   if (stylesheetConfig && stylesheetConfig.trim().length > 0) {
     const trimmed = stylesheetConfig.trim();
     const source = trimmed.includes("{")
       ? trimmed
       : readFileSync(join(args.workDir, trimmed), "utf8");
     const rules = parseModelStylesheet(source);
+    parsed.graphAttrs.model_stylesheet = source;
     await appendRunEvent(args.runId, "ModelStylesheetLoaded", {
       runId: args.runId,
       ruleCount: rules.length
     });
   }
+  const graph = applyGraphTransforms(parsed);
+  validateDotGraph(graph);
 
   const snapshot = buildRepositorySnapshot(args.workDir);
   await appendRunEvent(args.runId, "TaskRepositorySnapshotPrepared", {
@@ -910,7 +917,10 @@ async function processTaskRun(args: {
     restoredState ?? {
       context: {},
       nodeOutputs: {},
-      parallelOutputs: {}
+      parallelOutputs: {},
+      nodeOutcomes: {},
+      nodeRetryCounts: {},
+      completedNodes: []
     };
 
   initialState.context = {

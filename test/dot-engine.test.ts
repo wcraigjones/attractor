@@ -74,7 +74,10 @@ describe("DOT engine", () => {
       initialState: {
         context: { resumed: true },
         nodeOutputs: {},
-        parallelOutputs: {}
+        parallelOutputs: {},
+        nodeOutcomes: {},
+        nodeRetryCounts: {},
+        completedNodes: []
       },
       callbacks: {
         codergen: async ({ node }) => `ran-${node.id}`

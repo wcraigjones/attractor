@@ -1,10 +1,11 @@
-export { evaluateCondition } from "./condition.js";
+export { evaluateCondition, validateConditionSyntax } from "./condition.js";
 export { executeGraph } from "./executor.js";
-export { parseDotGraph, validateDotGraph } from "./parser.js";
-export { parseModelStylesheet } from "./stylesheet.js";
-export { applyGraphTransforms } from "./transforms.js";
+export { lintDotGraph, parseDotGraph, validateDotGraph } from "./parser.js";
+export { applyModelStylesheet, parseModelStylesheet } from "./stylesheet.js";
+export { applyGraphTransforms, applyVariableExpansion } from "./transforms.js";
 export type {
   CodergenInvocation,
+  DotDiagnostic,
   DotEdge,
   DotGraph,
   DotNode,
@@ -13,7 +14,10 @@ export type {
   EngineState,
   ExecuteGraphInput,
   ExecuteGraphResult,
+  HandlerResultLike,
   HandlerType,
   HumanQuestion,
+  NodeOutcome,
+  OutcomeStatus,
   ToolInvocation
 } from "./types.js";

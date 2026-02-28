@@ -1,6 +1,6 @@
-import type { EngineState } from "./types.js";
+import type { EngineState, NodeOutcome } from "./types.js";
 
-function splitTopLevel(expression: string, separator: string): string[] {
+function splitClauses(expression: string): string[] {
   const parts: string[] = [];
   let current = "";
   let quote: '"' | "'" | null = null;
@@ -8,6 +8,7 @@ function splitTopLevel(expression: string, separator: string): string[] {
   for (let index = 0; index < expression.length; index += 1) {
     const ch = expression[index] ?? "";
     const prev = index > 0 ? expression[index - 1] : "";
+    const next = index + 1 < expression.length ? expression[index + 1] ?? "" : "";
 
     if ((ch === '"' || ch === "'") && prev !== "\\") {
       if (quote === ch) {
@@ -17,98 +18,140 @@ function splitTopLevel(expression: string, separator: string): string[] {
       }
     }
 
-    if (!quote && expression.startsWith(separator, index)) {
-      parts.push(current.trim());
+    if (!quote && ch === "&" && next === "&") {
+      const trimmed = current.trim();
+      if (trimmed.length > 0) {
+        parts.push(trimmed);
+      }
       current = "";
-      index += separator.length - 1;
+      index += 1;
       continue;
     }
 
     current += ch;
   }
 
-  if (current.trim().length > 0) {
-    parts.push(current.trim());
+  const tail = current.trim();
+  if (tail.length > 0) {
+    parts.push(tail);
   }
-
   return parts;
 }
 
-function resolvePath(path: string, state: EngineState): unknown {
-  const normalized = path.trim();
-  if (!normalized) {
-    return undefined;
-  }
-
-  const root = {
-    context: state.context,
-    nodeOutputs: state.nodeOutputs,
-    parallelOutputs: state.parallelOutputs
-  } as Record<string, unknown>;
-
-  const parts = normalized.split(".").filter(Boolean);
-  let current: unknown = root;
-  for (const part of parts) {
-    if (!current || typeof current !== "object") {
-      return undefined;
-    }
-    current = (current as Record<string, unknown>)[part];
-  }
-  return current;
-}
-
-function parseValue(raw: string, state: EngineState): unknown {
+function trimLiteral(raw: string): string {
   const value = raw.trim();
-  if (value === "true") return true;
-  if (value === "false") return false;
-  if (value === "null") return null;
-  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+  if (
+    (value.startsWith('"') && value.endsWith('"')) ||
+    (value.startsWith("'") && value.endsWith("'"))
+  ) {
     return value.slice(1, -1);
   }
-  if (/^-?\d+(\.\d+)?$/.test(value)) {
-    return Number.parseFloat(value);
-  }
-  return resolvePath(value, state);
+  return value;
 }
 
-function evaluateBinary(expression: string, state: EngineState): boolean {
-  const comparator = expression.match(/^(.*?)\s*(==|!=|>=|<=|>|<)\s*(.*?)$/);
-  if (!comparator) {
-    return Boolean(parseValue(expression, state));
+function contextLookup(state: EngineState, key: string): unknown {
+  if (Object.hasOwn(state.context, key)) {
+    return state.context[key];
   }
-
-  const left = parseValue(comparator[1] ?? "", state);
-  const right = parseValue(comparator[3] ?? "", state);
-  const op = comparator[2] ?? "==";
-
-  if (op === "==") return left === right;
-  if (op === "!=") return left !== right;
-  if (op === ">") return Number(left) > Number(right);
-  if (op === "<") return Number(left) < Number(right);
-  if (op === ">=") return Number(left) >= Number(right);
-  if (op === "<=") return Number(left) <= Number(right);
-  return false;
+  if (Object.hasOwn(state.nodeOutputs, key)) {
+    return state.nodeOutputs[key];
+  }
+  return undefined;
 }
 
-export function evaluateCondition(expression: string, state: EngineState): boolean {
-  const expr = expression.trim();
-  if (!expr) {
+function resolveKey(key: string, state: EngineState, outcome?: NodeOutcome): string {
+  const trimmed = key.trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  if (trimmed === "outcome") {
+    return (outcome?.status ?? "").toLowerCase();
+  }
+  if (trimmed === "preferred_label") {
+    return outcome?.preferredLabel ?? "";
+  }
+
+  if (trimmed.startsWith("context.")) {
+    const direct = contextLookup(state, trimmed);
+    if (direct !== undefined) {
+      return String(direct);
+    }
+    const withoutPrefix = trimmed.slice("context.".length);
+    const fallback = contextLookup(state, withoutPrefix);
+    return fallback !== undefined ? String(fallback) : "";
+  }
+
+  const value = contextLookup(state, trimmed);
+  return value !== undefined ? String(value) : "";
+}
+
+function evaluateClause(clause: string, state: EngineState, outcome?: NodeOutcome): boolean {
+  const notEqualIndex = clause.indexOf("!=");
+  if (notEqualIndex >= 0) {
+    const key = clause.slice(0, notEqualIndex).trim();
+    const literal = trimLiteral(clause.slice(notEqualIndex + 2));
+    if (!key) {
+      throw new Error(`Invalid condition clause: ${clause}`);
+    }
+    return resolveKey(key, state, outcome) !== literal;
+  }
+
+  const equalIndex = clause.indexOf("=");
+  if (equalIndex >= 0) {
+    const key = clause.slice(0, equalIndex).trim();
+    const literal = trimLiteral(clause.slice(equalIndex + 1));
+    if (!key) {
+      throw new Error(`Invalid condition clause: ${clause}`);
+    }
+    return resolveKey(key, state, outcome) === literal;
+  }
+
+  const resolved = resolveKey(clause.trim(), state, outcome);
+  return resolved.length > 0;
+}
+
+export function validateConditionSyntax(expression: string): void {
+  const trimmed = expression.trim();
+  if (!trimmed) {
+    return;
+  }
+  const clauses = splitClauses(trimmed);
+  if (clauses.length === 0) {
+    throw new Error("Condition is empty");
+  }
+  for (const clause of clauses) {
+    const normalized = clause.trim();
+    if (!normalized) {
+      throw new Error("Condition contains an empty clause");
+    }
+    const hasEqual = normalized.includes("=");
+    const hasNotEqual = normalized.includes("!=");
+    if (hasEqual && !hasNotEqual && normalized.split("=").length !== 2) {
+      throw new Error(`Invalid '=' clause: ${normalized}`);
+    }
+    if (hasNotEqual && normalized.split("!=").length !== 2) {
+      throw new Error(`Invalid '!=' clause: ${normalized}`);
+    }
+  }
+}
+
+export function evaluateCondition(
+  expression: string,
+  state: EngineState,
+  outcome?: NodeOutcome
+): boolean {
+  const trimmed = expression.trim();
+  if (!trimmed) {
     return true;
   }
 
-  const orParts = splitTopLevel(expr, "||");
-  if (orParts.length > 1) {
-    return orParts.some((part) => evaluateCondition(part, state));
+  validateConditionSyntax(trimmed);
+  const clauses = splitClauses(trimmed);
+  for (const clause of clauses) {
+    if (!evaluateClause(clause, state, outcome)) {
+      return false;
+    }
   }
-
-  const andParts = splitTopLevel(expr, "&&");
-  if (andParts.length > 1) {
-    return andParts.every((part) => evaluateCondition(part, state));
-  }
-
-  if (expr.startsWith("!")) {
-    return !evaluateCondition(expr.slice(1), state);
-  }
-
-  return evaluateBinary(expr, state);
+  return true;
 }
