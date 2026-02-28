@@ -1741,6 +1741,22 @@ app.get("/api/secrets/global", async (_req, res) => {
   res.json({ secrets });
 });
 
+app.get("/api/secrets/global/:secretId/values", async (req, res) => {
+  const secret = await prisma.globalSecret.findUnique({
+    where: { id: req.params.secretId }
+  });
+  if (!secret) {
+    return sendError(res, 404, "global secret not found");
+  }
+
+  try {
+    const values = await readSecretValues(GLOBAL_SECRET_NAMESPACE, secret.k8sSecretName);
+    return res.json({ values });
+  } catch (error) {
+    return sendError(res, 404, error instanceof Error ? error.message : String(error));
+  }
+});
+
 app.post("/api/projects/:projectId/secrets", async (req, res) => {
   const input = createSecretSchema.safeParse(req.body);
   if (!input.success) {
@@ -1809,6 +1825,32 @@ app.get("/api/projects/:projectId/secrets", async (req, res) => {
     orderBy: { createdAt: "desc" }
   });
   res.json({ secrets });
+});
+
+app.get("/api/projects/:projectId/secrets/:secretId/values", async (req, res) => {
+  const secret = await prisma.projectSecret.findFirst({
+    where: {
+      id: req.params.secretId,
+      projectId: req.params.projectId
+    },
+    include: {
+      project: {
+        select: {
+          namespace: true
+        }
+      }
+    }
+  });
+  if (!secret) {
+    return sendError(res, 404, "project secret not found");
+  }
+
+  try {
+    const values = await readSecretValues(secret.project.namespace, secret.k8sSecretName);
+    return res.json({ values });
+  } catch (error) {
+    return sendError(res, 404, error instanceof Error ? error.message : String(error));
+  }
 });
 
 const createAttractorSchema = z.object({

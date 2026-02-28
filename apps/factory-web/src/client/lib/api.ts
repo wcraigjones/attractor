@@ -267,6 +267,11 @@ export async function listGlobalSecrets(): Promise<GlobalSecret[]> {
   return payload.secrets;
 }
 
+export async function getGlobalSecretValues(secretId: string): Promise<Record<string, string>> {
+  const payload = await apiRequest<{ values: Record<string, string> }>(`/api/secrets/global/${secretId}/values`);
+  return payload.values;
+}
+
 export async function upsertGlobalSecret(input: {
   name: string;
   provider?: string;
@@ -282,6 +287,13 @@ export async function upsertGlobalSecret(input: {
 export async function listProjectSecrets(projectId: string): Promise<ProjectSecret[]> {
   const payload = await apiRequest<{ secrets: ProjectSecret[] }>(`/api/projects/${projectId}/secrets`);
   return payload.secrets;
+}
+
+export async function getProjectSecretValues(projectId: string, secretId: string): Promise<Record<string, string>> {
+  const payload = await apiRequest<{ values: Record<string, string> }>(
+    `/api/projects/${projectId}/secrets/${secretId}/values`
+  );
+  return payload.values;
 }
 
 export async function upsertProjectSecret(
