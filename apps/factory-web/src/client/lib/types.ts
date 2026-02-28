@@ -84,6 +84,31 @@ export interface AttractorDef {
   updatedAt: string;
 }
 
+export interface AttractorDiagnostic {
+  rule: string;
+  severity: "ERROR" | "WARNING" | "INFO";
+  message: string;
+  nodeId?: string;
+  edge?: { from: string; to: string };
+  fix?: string;
+}
+
+export interface AttractorValidation {
+  valid: boolean;
+  errorCount: number;
+  warningCount: number;
+  diagnostics: AttractorDiagnostic[];
+}
+
+export interface AttractorVersion {
+  id: string;
+  version: number;
+  contentPath: string;
+  contentSha256: string;
+  sizeBytes: number;
+  createdAt: string;
+}
+
 export interface GlobalAttractor {
   id: string;
   name: string;
@@ -109,6 +134,9 @@ export interface Run {
   id: string;
   projectId: string;
   attractorDefId: string;
+  attractorContentPath: string | null;
+  attractorContentVersion: number | null;
+  attractorContentSha256: string | null;
   githubIssueId: string | null;
   githubPullRequestId: string | null;
   environmentId: string | null;

@@ -11,6 +11,9 @@
     "skipLibCheck": true,
     "baseUrl": ".",
     "paths": {
+      "@attractor/dot-engine": [
+        "../../packages/dot-engine/src/index.ts"
+      ],
       "@attractor/shared-types": [
         "../../packages/shared-types/src/index.ts"
       ],

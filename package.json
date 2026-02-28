@@ -25,6 +25,8 @@
     "check-types:root": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:conformance": "CONFORMANCE_SKIP_REGEX='^(07-models|08-coding-agent)/' bash ./conformance/run-all.sh",
+    "test:conformance:all": "ATTRACTOR_BIN=${ATTRACTOR_BIN:-$HOME/bin/attractor} bash ./conformance/run-all.sh",
     "test:all": "npm run test && npm run test --workspaces --if-present",
     "dev": "tsx watch src/index.ts",
     "dev:api": "npm --workspace @attractor/factory-api run dev",
