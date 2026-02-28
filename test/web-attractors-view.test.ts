@@ -17,6 +17,8 @@ function attractor(input: {
     scope: input.scope,
     name: input.name,
     repoPath: `${input.name}.dot`,
+    contentPath: `attractors/${input.name}/v1.dot`,
+    contentVersion: 1,
     defaultRunType: "planning",
     description: null,
     active: true,

@@ -1,7 +1,8 @@
-export type RunType = "planning" | "implementation";
+export type RunType = "planning" | "implementation" | "task";
 export type RunStatus = "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELED" | "TIMEOUT";
 export type AttractorScope = "PROJECT" | "GLOBAL";
 export type EnvironmentKind = "KUBERNETES_JOB";
+export type RunQuestionStatus = "PENDING" | "ANSWERED" | "TIMEOUT";
 
 export interface EnvironmentResources {
   requests?: {
@@ -73,7 +74,9 @@ export interface AttractorDef {
   projectId: string;
   scope: AttractorScope;
   name: string;
-  repoPath: string;
+  repoPath: string | null;
+  contentPath: string | null;
+  contentVersion: number;
   defaultRunType: RunType;
   description: string | null;
   active: boolean;
@@ -81,10 +84,37 @@ export interface AttractorDef {
   updatedAt: string;
 }
 
+export interface AttractorDiagnostic {
+  rule: string;
+  severity: "ERROR" | "WARNING" | "INFO";
+  message: string;
+  nodeId?: string;
+  edge?: { from: string; to: string };
+  fix?: string;
+}
+
+export interface AttractorValidation {
+  valid: boolean;
+  errorCount: number;
+  warningCount: number;
+  diagnostics: AttractorDiagnostic[];
+}
+
+export interface AttractorVersion {
+  id: string;
+  version: number;
+  contentPath: string;
+  contentSha256: string;
+  sizeBytes: number;
+  createdAt: string;
+}
+
 export interface GlobalAttractor {
   id: string;
   name: string;
-  repoPath: string;
+  repoPath: string | null;
+  contentPath: string | null;
+  contentVersion: number;
   defaultRunType: RunType;
   description: string | null;
   active: boolean;
@@ -104,6 +134,11 @@ export interface Run {
   id: string;
   projectId: string;
   attractorDefId: string;
+  attractorContentPath: string | null;
+  attractorContentVersion: number | null;
+  attractorContentSha256: string | null;
+  githubIssueId: string | null;
+  githubPullRequestId: string | null;
   environmentId: string | null;
   runType: RunType;
   sourceBranch: string;
@@ -116,7 +151,145 @@ export interface Run {
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
+  githubIssue?: GitHubIssue | null;
+  githubPullRequest?: GitHubPullRequest | null;
   events?: RunEvent[];
+}
+
+export interface GitHubIssue {
+  id: string;
+  projectId: string;
+  issueNumber: number;
+  state: string;
+  title: string;
+  body: string | null;
+  author: string | null;
+  labelsJson: unknown | null;
+  assigneesJson: unknown | null;
+  url: string;
+  openedAt: string;
+  closedAt: string | null;
+  updatedAt: string;
+  syncedAt: string;
+  createdAt: string;
+  runCount?: number;
+  pullRequestCount?: number;
+}
+
+export interface GitHubPullRequest {
+  id: string;
+  projectId: string;
+  prNumber: number;
+  state: string;
+  title: string;
+  body: string | null;
+  url: string;
+  headRefName: string;
+  headSha: string;
+  baseRefName: string;
+  mergedAt: string | null;
+  openedAt: string;
+  closedAt: string | null;
+  updatedAt: string;
+  syncedAt: string;
+  linkedIssueId: string | null;
+}
+
+export interface GitHubPullQueueItem {
+  pullRequest: GitHubPullRequest & { linkedIssue?: GitHubIssue | null };
+  linkedRunId: string | null;
+  reviewDecision: ReviewDecision | null;
+  reviewStatus: "Pending" | "Completed" | "Overdue";
+  risk: "low" | "medium" | "high";
+  dueAt: string;
+  minutesRemaining: number;
+  criticalCount: number;
+  artifactCount: number;
+  openPackPath: string | null;
+}
+
+export interface RunQuestion {
+  id: string;
+  runId: string;
+  nodeId: string;
+  prompt: string;
+  options: unknown | null;
+  answer: unknown | null;
+  status: RunQuestionStatus;
+  createdAt: string;
+  answeredAt: string | null;
+}
+
+export type ReviewDecision = "APPROVE" | "REQUEST_CHANGES" | "REJECT" | "EXCEPTION";
+
+export interface RunReviewChecklist {
+  summaryReviewed: boolean;
+  criticalCodeReviewed: boolean;
+  artifactsReviewed: boolean;
+  functionalValidationReviewed: boolean;
+}
+
+export interface RunReview {
+  id: string;
+  runId: string;
+  reviewer: string;
+  decision: ReviewDecision;
+  checklist: RunReviewChecklist;
+  summary: string | null;
+  criticalFindings: string | null;
+  artifactFindings: string | null;
+  attestation: string | null;
+  reviewedHeadSha: string | null;
+  summarySnapshotJson: unknown | null;
+  criticalSectionsSnapshotJson: unknown | null;
+  artifactFocusSnapshotJson: unknown | null;
+  githubCheckRunId: string | null;
+  githubSummaryCommentId: string | null;
+  githubWritebackStatus: string | null;
+  githubWritebackAt: string | null;
+  reviewedAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReviewChecklistTemplateItem {
+  key: keyof RunReviewChecklist;
+  label: string;
+}
+
+export interface ReviewPackArtifact {
+  id: string;
+  key: string;
+  path: string;
+  contentType?: string | null;
+  sizeBytes?: number | null;
+  priority: number;
+  reason: string;
+}
+
+export interface ReviewCriticalSection {
+  path: string;
+  riskLevel: "high" | "medium" | "low";
+  reason: string;
+}
+
+export interface RunReviewPack {
+  dueAt: string;
+  overdue: boolean;
+  minutesRemaining: number;
+  summarySuggestion: string;
+  artifactFocus: ReviewPackArtifact[];
+  criticalSections: ReviewCriticalSection[];
+}
+
+export interface RunReviewResponse {
+  frameworkVersion: string;
+  review: RunReview | null;
+  checklistTemplate: ReviewChecklistTemplateItem[];
+  pack: RunReviewPack;
+  github?: {
+    pullRequest?: GitHubPullRequest | null;
+  };
 }
 
 export interface Artifact {

@@ -42,7 +42,7 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: factory-api-role
+  name: factory-api-role-{{ include "factory.namespace" . }}
   labels:
     {{- include "factory.labels" . | nindent 4 }}
 rules:
@@ -56,7 +56,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: factory-api-rolebinding
+  name: factory-api-rolebinding-{{ include "factory.namespace" . }}
   labels:
     {{- include "factory.labels" . | nindent 4 }}
 subjects:
@@ -66,12 +66,12 @@ subjects:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: factory-api-role
+  name: factory-api-role-{{ include "factory.namespace" . }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: factory-runner-controller-role
+  name: factory-runner-controller-role-{{ include "factory.namespace" . }}
   labels:
     {{- include "factory.labels" . | nindent 4 }}
 rules:
@@ -85,7 +85,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: factory-runner-controller-rolebinding
+  name: factory-runner-controller-rolebinding-{{ include "factory.namespace" . }}
   labels:
     {{- include "factory.labels" . | nindent 4 }}
 subjects:
@@ -95,7 +95,7 @@ subjects:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: factory-runner-controller-role
+  name: factory-runner-controller-role-{{ include "factory.namespace" . }}
 ---
 apiVersion: v1
 kind: Service
@@ -299,6 +299,18 @@ spec:
               value: "postgresql://{{ .Values.postgres.user }}:{{ .Values.postgres.password }}@postgres.{{ include "factory.namespace" . }}.svc.cluster.local:5432/{{ .Values.postgres.database }}"
             - name: RUNNER_IMAGE
               value: "{{ .Values.images.runner.repository }}:{{ .Values.images.runner.tag }}"
+            - name: GITHUB_APP_SLUG
+              value: {{ .Values.github.appSlug | quote }}
+            - name: GITHUB_APP_ID
+              value: {{ .Values.github.appId | quote }}
+            - name: GITHUB_APP_PRIVATE_KEY
+              value: {{ .Values.github.appPrivateKey | quote }}
+            - name: GITHUB_WEBHOOK_SECRET
+              value: {{ .Values.github.webhookSecret | quote }}
+            - name: GITHUB_SYNC_ENABLED
+              value: {{ .Values.github.syncEnabled | quote }}
+            - name: GITHUB_RECONCILE_INTERVAL_MINUTES
+              value: {{ .Values.github.reconcileIntervalMinutes | quote }}
             - name: MINIO_BUCKET
               value: {{ .Values.minio.bucket | quote }}
             - name: MINIO_ACCESS_KEY
@@ -412,6 +424,12 @@ spec:
               value: "{{ .Values.images.runner.repository }}:{{ .Values.images.runner.tag }}"
             - name: FACTORY_API_BASE_URL
               value: "http://factory-api.{{ include "factory.namespace" . }}.svc.cluster.local:{{ .Values.service.api.port }}"
+            - name: GITHUB_APP_ID
+              value: {{ .Values.github.appId | quote }}
+            - name: GITHUB_APP_PRIVATE_KEY
+              value: {{ .Values.github.appPrivateKey | quote }}
+            - name: GITHUB_TOKEN
+              value: {{ .Values.github.token | quote }}
             - name: MINIO_ENDPOINT
               value: "http://minio.{{ include "factory.namespace" . }}.svc.cluster.local:9000"
             - name: MINIO_BUCKET

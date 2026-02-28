@@ -302,6 +302,9 @@ async function processRun(runId: string): Promise<void> {
       minioBucket: MINIO_BUCKET,
       minioAccessKey: MINIO_ACCESS_KEY,
       minioSecretKey: MINIO_SECRET_KEY,
+      githubAppId: process.env.GITHUB_APP_ID,
+      githubAppPrivateKey: process.env.GITHUB_APP_PRIVATE_KEY,
+      githubToken: process.env.GITHUB_TOKEN,
       defaultServiceAccountName: SERVICE_ACCOUNT
     });
 

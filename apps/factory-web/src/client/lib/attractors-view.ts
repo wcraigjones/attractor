@@ -4,13 +4,20 @@ export type AttractorRowStatus = "Project" | "Inherited" | "Overridden";
 
 export interface AttractorViewRow {
   id: string;
+  attractorId: string;
   source: "project" | "global";
   name: string;
-  repoPath: string;
+  location: string;
+  contentVersion: number;
+  storageBacked: boolean;
   defaultRunType: AttractorDef["defaultRunType"];
   active: boolean;
   status: AttractorRowStatus;
   muted: boolean;
+}
+
+function displayLocation(attractor: AttractorDef): string {
+  return attractor.contentPath ?? attractor.repoPath ?? "-";
 }
 
 function isProjectAttractor(attractor: AttractorDef): boolean {
@@ -39,9 +46,12 @@ export function buildProjectAttractorsViewRows(attractors: AttractorDef[]): Attr
     .filter((attractor) => isProjectAttractor(attractor))
     .map((attractor) => ({
       id: `project:${attractor.id}`,
+      attractorId: attractor.id,
       source: "project",
       name: attractor.name,
-      repoPath: attractor.repoPath,
+      location: displayLocation(attractor),
+      contentVersion: attractor.contentVersion,
+      storageBacked: Boolean(attractor.contentPath),
       defaultRunType: attractor.defaultRunType,
       active: attractor.active,
       status: "Project",
@@ -54,9 +64,12 @@ export function buildProjectAttractorsViewRows(attractors: AttractorDef[]): Attr
       const overridden = projectByName.has(attractor.name);
       return {
         id: `global:${attractor.id}`,
+        attractorId: attractor.id,
         source: "global" as const,
         name: attractor.name,
-        repoPath: attractor.repoPath,
+        location: displayLocation(attractor),
+        contentVersion: attractor.contentVersion,
+        storageBacked: Boolean(attractor.contentPath),
         defaultRunType: attractor.defaultRunType,
         active: attractor.active,
         status: overridden ? "Overridden" : "Inherited",

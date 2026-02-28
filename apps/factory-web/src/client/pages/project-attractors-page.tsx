@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
-import { createAttractor, listAttractors } from "../lib/api";
+import { createAttractor, getProjectAttractor, listAttractors } from "../lib/api";
 import { buildProjectAttractorsViewRows, type AttractorRowStatus } from "../lib/attractors-view";
 import { PageTitle } from "../components/layout/page-title";
 import { Badge } from "../components/ui/badge";
@@ -14,6 +14,12 @@ import { Label } from "../components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { Textarea } from "../components/ui/textarea";
+
+const DEFAULT_DOT_TEMPLATE = `digraph attractor {
+  start [shape=Mdiamond, type="start", label="Start"];
+  done [shape=Msquare, type="exit", label="Done"];
+  start -> done;
+}`;
 
 function statusVariant(status: AttractorRowStatus): "default" | "secondary" | "success" | "warning" {
   if (status === "Project") {
@@ -28,11 +34,13 @@ function statusVariant(status: AttractorRowStatus): "default" | "secondary" | "s
 export function ProjectAttractorsPage() {
   const params = useParams<{ projectId: string }>();
   const projectId = params.projectId ?? "";
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
 
   const [name, setName] = useState("");
-  const [repoPath, setRepoPath] = useState("factory/self-bootstrap.dot");
-  const [defaultRunType, setDefaultRunType] = useState<"planning" | "implementation">("planning");
+  const [sourceLabel, setSourceLabel] = useState("");
+  const [content, setContent] = useState(DEFAULT_DOT_TEMPLATE);
+  const [defaultRunType, setDefaultRunType] = useState<"planning" | "implementation" | "task">("planning");
   const [description, setDescription] = useState("");
 
   const attractorsQuery = useQuery({
@@ -46,7 +54,8 @@ export function ProjectAttractorsPage() {
     mutationFn: () =>
       createAttractor(projectId, {
         name: name.trim(),
-        repoPath: repoPath.trim(),
+        content,
+        ...(sourceLabel.trim().length > 0 ? { repoPath: sourceLabel.trim() } : {}),
         defaultRunType,
         description: description.trim().length > 0 ? description.trim() : undefined,
         active: true
@@ -55,6 +64,40 @@ export function ProjectAttractorsPage() {
       toast.success("Attractor saved");
       setName("");
       setDescription("");
+      void queryClient.invalidateQueries({ queryKey: ["attractors", projectId] });
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : String(error));
+    }
+  });
+
+  const duplicateMutation = useMutation({
+    mutationFn: async (input: { attractorId: string }) => {
+      const detail = await getProjectAttractor(projectId, input.attractorId);
+      if (!detail.content) {
+        throw new Error("Cannot duplicate attractor with missing DOT content");
+      }
+
+      const existingNames = new Set((attractorsQuery.data ?? []).map((item) => item.name));
+      const base = `${detail.attractor.name}-copy`;
+      let nextName = base;
+      let suffix = 2;
+      while (existingNames.has(nextName)) {
+        nextName = `${base}-${suffix}`;
+        suffix += 1;
+      }
+
+      return createAttractor(projectId, {
+        name: nextName,
+        content: detail.content,
+        ...(detail.attractor.repoPath ? { repoPath: detail.attractor.repoPath } : {}),
+        defaultRunType: detail.attractor.defaultRunType,
+        ...(detail.attractor.description ? { description: detail.attractor.description } : {}),
+        active: detail.attractor.active
+      });
+    },
+    onSuccess: () => {
+      toast.success("Attractor duplicated");
       void queryClient.invalidateQueries({ queryKey: ["attractors", projectId] });
     },
     onError: (error) => {
@@ -83,10 +126,12 @@ export function ProjectAttractorsPage() {
                 <TableRow>
                   <TableHead>Source</TableHead>
                   <TableHead>Name</TableHead>
-                  <TableHead>Path</TableHead>
+                  <TableHead>Storage Path</TableHead>
+                  <TableHead>Version</TableHead>
                   <TableHead>Default Run</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Activity</TableHead>
+                  <TableHead>Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -101,15 +146,52 @@ export function ProjectAttractorsPage() {
                       </Badge>
                     </TableCell>
                     <TableCell>{attractor.name}</TableCell>
-                    <TableCell className="mono text-xs">{attractor.repoPath}</TableCell>
+                    <TableCell className="mono text-xs">{attractor.location}</TableCell>
+                    <TableCell>{attractor.contentVersion > 0 ? attractor.contentVersion : "-"}</TableCell>
                     <TableCell>{attractor.defaultRunType}</TableCell>
                     <TableCell>
                       <Badge variant={statusVariant(attractor.status)}>{attractor.status}</Badge>
+                      {!attractor.storageBacked ? <Badge variant="warning" className="ml-2">Legacy</Badge> : null}
                     </TableCell>
                     <TableCell>
                       <Badge variant={attractor.active ? "success" : "secondary"}>
                         {attractor.active ? "Active" : "Inactive"}
                       </Badge>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex flex-wrap gap-1">
+                        <Button asChild size="sm" variant="outline">
+                          <Link to={`/projects/${projectId}/attractors/${attractor.attractorId}?tab=editor`}>Edit</Link>
+                        </Button>
+                        <Button asChild size="sm" variant="outline">
+                          <Link to={`/projects/${projectId}/attractors/${attractor.attractorId}?tab=viewer`}>View</Link>
+                        </Button>
+                        <Button asChild size="sm" variant="outline">
+                          <Link to={`/projects/${projectId}/attractors/${attractor.attractorId}?tab=viewer&panel=history`}>
+                            History
+                          </Link>
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => {
+                            duplicateMutation.mutate({ attractorId: attractor.attractorId });
+                          }}
+                          disabled={duplicateMutation.isPending}
+                        >
+                          Duplicate
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={!attractor.storageBacked || attractor.status === "Overridden" || !attractor.active}
+                          onClick={() => {
+                            navigate(`/projects/${projectId}/runs?attractorDefId=${attractor.attractorId}`);
+                          }}
+                        >
+                          Run
+                        </Button>
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -118,6 +200,9 @@ export function ProjectAttractorsPage() {
             {effectiveRows.length === 0 ? (
               <p className="mt-3 text-sm text-muted-foreground">No project or global attractors have been configured yet.</p>
             ) : null}
+            <p className="mt-3 text-sm text-muted-foreground">
+              Legacy attractors without storage-backed content are read-only for new runs. Duplicate them to recreate as storage-backed definitions.
+            </p>
           </CardContent>
         </Card>
 
@@ -131,8 +216,8 @@ export function ProjectAttractorsPage() {
               className="space-y-3"
               onSubmit={(event) => {
                 event.preventDefault();
-                if (!name.trim() || !repoPath.trim()) {
-                  toast.error("Name and repository path are required");
+                if (!name.trim() || !content.trim()) {
+                  toast.error("Name and DOT content are required");
                   return;
                 }
                 createMutation.mutate();
@@ -143,18 +228,31 @@ export function ProjectAttractorsPage() {
                 <Input value={name} onChange={(event) => setName(event.target.value)} />
               </div>
               <div className="space-y-1">
-                <Label>Repo Path</Label>
-                <Input value={repoPath} onChange={(event) => setRepoPath(event.target.value)} />
+                <Label>Source Label (optional)</Label>
+                <Input
+                  value={sourceLabel}
+                  onChange={(event) => setSourceLabel(event.target.value)}
+                  placeholder="factory/self-bootstrap.dot"
+                />
+              </div>
+              <div className="space-y-1">
+                <Label>DOT Content</Label>
+                <Textarea
+                  value={content}
+                  onChange={(event) => setContent(event.target.value)}
+                  className="min-h-[220px] font-mono text-xs"
+                />
               </div>
               <div className="space-y-1">
                 <Label>Default Run Type</Label>
-                <Select value={defaultRunType} onValueChange={(value: "planning" | "implementation") => setDefaultRunType(value)}>
+                <Select value={defaultRunType} onValueChange={(value: "planning" | "implementation" | "task") => setDefaultRunType(value)}>
                   <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="planning">planning</SelectItem>
                     <SelectItem value="implementation">implementation</SelectItem>
+                    <SelectItem value="task">task</SelectItem>
                   </SelectContent>
                 </Select>
               </div>

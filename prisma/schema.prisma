@@ -10,6 +10,7 @@ datasource db {
 enum RunType {
   planning
   implementation
+  task
 }
 
 enum EnvironmentKind {
@@ -25,9 +26,22 @@ enum RunStatus {
   TIMEOUT
 }
 
+enum ReviewDecision {
+  APPROVE
+  REQUEST_CHANGES
+  REJECT
+  EXCEPTION
+}
+
 enum AttractorScope {
   PROJECT
   GLOBAL
+}
+
+enum RunQuestionStatus {
+  PENDING
+  ANSWERED
+  TIMEOUT
 }
 
 model Project {
@@ -43,6 +57,9 @@ model Project {
   secrets              ProjectSecret[]
   attractors           AttractorDef[]
   runs                 Run[]
+  githubIssues         GitHubIssue[]
+  githubPullRequests   GitHubPullRequest[]
+  githubSyncState      GitHubSyncState?
   defaultEnvironment   Environment?   @relation("ProjectDefaultEnvironment", fields: [defaultEnvironmentId], references: [id], onDelete: SetNull)
 
   @@index([defaultEnvironmentId])
@@ -61,12 +78,15 @@ model GlobalSecret {
 model GlobalAttractor {
   id             String   @id @default(cuid())
   name           String   @unique
-  repoPath       String
+  repoPath       String?
+  contentPath    String?
+  contentVersion Int      @default(0)
   defaultRunType RunType
   description    String?
   active         Boolean  @default(true)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
+  versions       GlobalAttractorVersion[]
 }
 
 model ProjectSecret {
@@ -88,7 +108,9 @@ model AttractorDef {
   projectId      String
   scope          AttractorScope @default(PROJECT)
   name           String
-  repoPath       String
+  repoPath       String?
+  contentPath    String?
+  contentVersion Int      @default(0)
   defaultRunType RunType
   description    String?
   active         Boolean  @default(true)
@@ -96,14 +118,48 @@ model AttractorDef {
   updatedAt      DateTime @updatedAt
   project        Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
   runs           Run[]
+  versions       AttractorDefVersion[]
 
   @@unique([projectId, name, scope])
+}
+
+model GlobalAttractorVersion {
+  id               String         @id @default(cuid())
+  globalAttractorId String
+  version          Int
+  contentPath      String
+  contentSha256    String
+  sizeBytes        Int
+  createdAt        DateTime       @default(now())
+  globalAttractor  GlobalAttractor @relation(fields: [globalAttractorId], references: [id], onDelete: Cascade)
+
+  @@unique([globalAttractorId, version])
+  @@index([globalAttractorId, createdAt])
+}
+
+model AttractorDefVersion {
+  id             String      @id @default(cuid())
+  attractorDefId String
+  version        Int
+  contentPath    String
+  contentSha256  String
+  sizeBytes      Int
+  createdAt      DateTime    @default(now())
+  attractorDef   AttractorDef @relation(fields: [attractorDefId], references: [id], onDelete: Cascade)
+
+  @@unique([attractorDefId, version])
+  @@index([attractorDefId, createdAt])
 }
 
 model Run {
   id            String      @id @default(cuid())
   projectId     String
   attractorDefId String
+  attractorContentPath String?
+  attractorContentVersion Int?
+  attractorContentSha256 String?
+  githubIssueId String?
+  githubPullRequestId String?
   environmentId String?
   runType       RunType
   sourceBranch  String
@@ -118,15 +174,113 @@ model Run {
   finishedAt    DateTime?
   project       Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
   attractorDef  AttractorDef @relation(fields: [attractorDefId], references: [id], onDelete: Cascade)
+  githubIssue   GitHubIssue? @relation(fields: [githubIssueId], references: [id], onDelete: SetNull)
+  githubPullRequest GitHubPullRequest? @relation(fields: [githubPullRequestId], references: [id], onDelete: SetNull)
   environment   Environment? @relation(fields: [environmentId], references: [id], onDelete: SetNull)
   events        RunEvent[]
   artifacts     Artifact[]
+  review        RunReview?
+  checkpoint    RunCheckpoint?
+  nodeOutcomes  RunNodeOutcome[]
+  questions     RunQuestion[]
   producedSpecBundle SpecBundle? @relation("ProducedSpecBundle")
   referencedSpecBundle SpecBundle? @relation("ReferencedSpecBundle", fields: [specBundleId], references: [id], onDelete: SetNull)
 
   @@index([projectId, status])
   @@index([projectId, targetBranch, runType, status])
+  @@index([githubIssueId])
+  @@index([githubPullRequestId])
   @@index([environmentId])
+}
+
+model RunReview {
+  id               String         @id @default(cuid())
+  runId            String         @unique
+  reviewer         String
+  decision         ReviewDecision
+  checklistJson    Json
+  summary          String?
+  criticalFindings String?
+  artifactFindings String?
+  attestation      String?
+  reviewedHeadSha  String?
+  summarySnapshotJson Json?
+  criticalSectionsSnapshotJson Json?
+  artifactFocusSnapshotJson Json?
+  githubCheckRunId String?
+  githubSummaryCommentId String?
+  githubWritebackStatus String?
+  githubWritebackAt DateTime?
+  reviewedAt       DateTime       @default(now())
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  run              Run            @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([reviewedAt])
+}
+
+model GitHubIssue {
+  id          String    @id @default(cuid())
+  projectId   String
+  issueNumber Int
+  state       String
+  title       String
+  body        String?
+  author      String?
+  labelsJson  Json?
+  assigneesJson Json?
+  url         String
+  openedAt    DateTime
+  closedAt    DateTime?
+  updatedAt   DateTime
+  syncedAt    DateTime  @default(now())
+  createdAt   DateTime  @default(now())
+  project     Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  runs        Run[]
+  pullRequests GitHubPullRequest[]
+
+  @@unique([projectId, issueNumber])
+  @@index([projectId, state, syncedAt])
+  @@index([projectId, syncedAt])
+}
+
+model GitHubPullRequest {
+  id            String    @id @default(cuid())
+  projectId      String
+  prNumber       Int
+  state          String
+  title          String
+  body           String?
+  url            String
+  headRefName    String
+  headSha        String
+  baseRefName    String
+  mergedAt       DateTime?
+  openedAt       DateTime
+  closedAt       DateTime?
+  updatedAt      DateTime
+  syncedAt       DateTime  @default(now())
+  linkedIssueId  String?
+  project        Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  linkedIssue    GitHubIssue? @relation(fields: [linkedIssueId], references: [id], onDelete: SetNull)
+  runs           Run[]
+
+  @@unique([projectId, prNumber])
+  @@index([projectId, state, syncedAt])
+  @@index([projectId, headSha])
+  @@index([linkedIssueId])
+}
+
+model GitHubSyncState {
+  projectId       String   @id
+  issuesCursor    String?
+  pullsCursor     String?
+  lastIssueSyncAt DateTime?
+  lastPullSyncAt  DateTime?
+  lastError       String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  project         Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
 }
 
 model Environment {
@@ -176,4 +330,42 @@ model RunEvent {
   run     Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
 
   @@index([runId, ts])
+}
+
+model RunCheckpoint {
+  id            String   @id @default(cuid())
+  runId         String   @unique
+  currentNodeId String
+  contextJson   Json
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  run           Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+}
+
+model RunNodeOutcome {
+  id        String   @id @default(cuid())
+  runId     String
+  nodeId    String
+  status    String
+  attempt   Int
+  payload   Json
+  createdAt DateTime @default(now())
+  run       Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId, nodeId])
+}
+
+model RunQuestion {
+  id         String            @id @default(cuid())
+  runId      String
+  nodeId     String
+  prompt     String
+  options    Json?
+  answer     Json?
+  status     RunQuestionStatus @default(PENDING)
+  createdAt  DateTime          @default(now())
+  answeredAt DateTime?
+  run        Run               @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId, status, createdAt])
 }

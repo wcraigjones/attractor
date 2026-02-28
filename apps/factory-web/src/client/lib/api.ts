@@ -2,14 +2,22 @@ import type {
   Artifact,
   ArtifactContentResponse,
   AttractorDef,
+  AttractorValidation,
+  AttractorVersion,
   Environment,
   EnvironmentResources,
+  GitHubIssue,
+  GitHubPullQueueItem,
+  GitHubPullRequest,
   GlobalAttractor,
   GlobalSecret,
   Project,
   ProjectSecret,
   ProviderSchema,
   Run,
+  RunQuestion,
+  RunReviewChecklist,
+  RunReviewResponse,
   RunModelConfig,
   SpecBundle
 } from "./types";
@@ -67,6 +75,106 @@ export async function connectProjectRepo(
     method: "POST",
     body: JSON.stringify(input)
   });
+}
+
+export async function reconcileProjectGitHub(
+  projectId: string
+): Promise<{ projectId: string; issuesSynced: number; pullRequestsSynced: number }> {
+  return apiRequest<{ projectId: string; issuesSynced: number; pullRequestsSynced: number }>(
+    `/api/projects/${projectId}/github/reconcile`,
+    {
+      method: "POST"
+    }
+  );
+}
+
+export async function listProjectGitHubIssues(
+  projectId: string,
+  input?: { state?: "open" | "closed" | "all"; q?: string; limit?: number }
+): Promise<GitHubIssue[]> {
+  const query = new URLSearchParams();
+  if (input?.state) {
+    query.set("state", input.state);
+  }
+  if (input?.q) {
+    query.set("q", input.q);
+  }
+  if (input?.limit) {
+    query.set("limit", String(input.limit));
+  }
+  const payload = await apiRequest<{ issues: GitHubIssue[] }>(
+    `/api/projects/${projectId}/github/issues${query.toString() ? `?${query}` : ""}`
+  );
+  return payload.issues;
+}
+
+export async function getProjectGitHubIssue(
+  projectId: string,
+  issueNumber: number
+): Promise<{
+  issue: GitHubIssue;
+  runs: Run[];
+  pullRequests: GitHubPullRequest[];
+  launchDefaults: {
+    sourceBranch: string;
+    targetBranch: string;
+    attractorOptions: Array<{ id: string; name: string; defaultRunType: "planning" | "implementation" | "task" }>;
+  };
+}> {
+  return apiRequest(`/api/projects/${projectId}/github/issues/${issueNumber}`);
+}
+
+export async function listProjectGitHubPulls(
+  projectId: string,
+  input?: { state?: "open" | "closed" | "all"; limit?: number }
+): Promise<GitHubPullQueueItem[]> {
+  const query = new URLSearchParams();
+  if (input?.state) {
+    query.set("state", input.state);
+  }
+  if (input?.limit) {
+    query.set("limit", String(input.limit));
+  }
+  const payload = await apiRequest<{ pulls: GitHubPullQueueItem[] }>(
+    `/api/projects/${projectId}/github/pulls${query.toString() ? `?${query}` : ""}`
+  );
+  return payload.pulls;
+}
+
+export async function getProjectGitHubPull(
+  projectId: string,
+  prNumber: number
+): Promise<{ pull: GitHubPullQueueItem }> {
+  return apiRequest(`/api/projects/${projectId}/github/pulls/${prNumber}`);
+}
+
+export async function launchIssueRun(
+  projectId: string,
+  issueNumber: number,
+  input: {
+    attractorDefId: string;
+    environmentId?: string;
+    runType: "planning" | "implementation" | "task";
+    sourceBranch?: string;
+    targetBranch?: string;
+    specBundleId?: string;
+    modelConfig: RunModelConfig;
+    force?: boolean;
+  }
+): Promise<{
+  runId: string;
+  status: string;
+  sourceBranch: string;
+  targetBranch: string;
+  githubIssue: GitHubIssue;
+}> {
+  return apiRequest(
+    `/api/projects/${projectId}/github/issues/${issueNumber}/runs`,
+    {
+      method: "POST",
+      body: JSON.stringify(input)
+    }
+  );
 }
 
 export async function createProject(input: {
@@ -201,10 +309,33 @@ export async function listGlobalAttractors(): Promise<GlobalAttractor[]> {
   return payload.attractors;
 }
 
+export async function getGlobalAttractor(
+  attractorId: string
+): Promise<{ attractor: GlobalAttractor; content: string | null; validation: AttractorValidation }> {
+  return apiRequest<{ attractor: GlobalAttractor; content: string | null; validation: AttractorValidation }>(
+    `/api/attractors/global/${attractorId}`
+  );
+}
+
+export async function listGlobalAttractorVersions(attractorId: string): Promise<AttractorVersion[]> {
+  const payload = await apiRequest<{ versions: AttractorVersion[] }>(`/api/attractors/global/${attractorId}/versions`);
+  return payload.versions;
+}
+
+export async function getGlobalAttractorVersion(
+  attractorId: string,
+  version: number
+): Promise<{ version: AttractorVersion; content: string | null; validation: AttractorValidation }> {
+  return apiRequest<{ version: AttractorVersion; content: string | null; validation: AttractorValidation }>(
+    `/api/attractors/global/${attractorId}/versions/${version}`
+  );
+}
+
 export async function upsertGlobalAttractor(input: {
   name: string;
-  repoPath: string;
-  defaultRunType: "planning" | "implementation";
+  content: string;
+  repoPath?: string;
+  defaultRunType: "planning" | "implementation" | "task";
   description?: string;
   active?: boolean;
 }): Promise<GlobalAttractor> {
@@ -214,12 +345,34 @@ export async function upsertGlobalAttractor(input: {
   });
 }
 
+export async function updateGlobalAttractor(
+  attractorId: string,
+  input: {
+    expectedContentVersion?: number;
+    name?: string;
+    content?: string;
+    repoPath?: string | null;
+    defaultRunType?: "planning" | "implementation" | "task";
+    description?: string | null;
+    active?: boolean;
+  }
+): Promise<{ attractor: GlobalAttractor; content: string | null; validation: AttractorValidation }> {
+  return apiRequest<{ attractor: GlobalAttractor; content: string | null; validation: AttractorValidation }>(
+    `/api/attractors/global/${attractorId}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(input)
+    }
+  );
+}
+
 export async function createAttractor(
   projectId: string,
   input: {
     name: string;
-    repoPath: string;
-    defaultRunType: "planning" | "implementation";
+    content: string;
+    repoPath?: string;
+    defaultRunType: "planning" | "implementation" | "task";
     description?: string;
     active?: boolean;
   }
@@ -228,6 +381,57 @@ export async function createAttractor(
     method: "POST",
     body: JSON.stringify(input)
   });
+}
+
+export async function getProjectAttractor(
+  projectId: string,
+  attractorId: string
+): Promise<{ attractor: AttractorDef; content: string | null; validation: AttractorValidation }> {
+  return apiRequest<{ attractor: AttractorDef; content: string | null; validation: AttractorValidation }>(
+    `/api/projects/${projectId}/attractors/${attractorId}`
+  );
+}
+
+export async function listProjectAttractorVersions(
+  projectId: string,
+  attractorId: string
+): Promise<AttractorVersion[]> {
+  const payload = await apiRequest<{ versions: AttractorVersion[] }>(
+    `/api/projects/${projectId}/attractors/${attractorId}/versions`
+  );
+  return payload.versions;
+}
+
+export async function getProjectAttractorVersion(
+  projectId: string,
+  attractorId: string,
+  version: number
+): Promise<{ version: AttractorVersion; content: string | null; validation: AttractorValidation }> {
+  return apiRequest<{ version: AttractorVersion; content: string | null; validation: AttractorValidation }>(
+    `/api/projects/${projectId}/attractors/${attractorId}/versions/${version}`
+  );
+}
+
+export async function updateProjectAttractor(
+  projectId: string,
+  attractorId: string,
+  input: {
+    expectedContentVersion?: number;
+    name?: string;
+    content?: string;
+    repoPath?: string | null;
+    defaultRunType?: "planning" | "implementation" | "task";
+    description?: string | null;
+    active?: boolean;
+  }
+): Promise<{ attractor: AttractorDef; content: string | null; validation: AttractorValidation }> {
+  return apiRequest<{ attractor: AttractorDef; content: string | null; validation: AttractorValidation }>(
+    `/api/projects/${projectId}/attractors/${attractorId}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(input)
+    }
+  );
 }
 
 export async function listProjectRuns(projectId: string): Promise<Run[]> {
@@ -239,7 +443,7 @@ export async function createRun(input: {
   projectId: string;
   attractorDefId: string;
   environmentId?: string;
-  runType: "planning" | "implementation";
+  runType: "planning" | "implementation" | "task";
   sourceBranch: string;
   targetBranch: string;
   specBundleId?: string;
@@ -261,10 +465,48 @@ export async function cancelRun(runId: string): Promise<{ runId: string; status:
   });
 }
 
+export async function getRunQuestions(runId: string): Promise<RunQuestion[]> {
+  const payload = await apiRequest<{ questions: RunQuestion[] }>(`/api/runs/${runId}/questions`);
+  return payload.questions;
+}
+
+export async function answerRunQuestion(
+  runId: string,
+  questionId: string,
+  input: { answer: string }
+): Promise<{ question: RunQuestion }> {
+  return apiRequest<{ question: RunQuestion }>(`/api/runs/${runId}/questions/${questionId}/answer`, {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+}
+
 export async function getRunArtifacts(runId: string): Promise<{ artifacts: Artifact[]; specBundle: SpecBundle | null }> {
   return apiRequest<{ artifacts: Artifact[]; specBundle: SpecBundle | null }>(`/api/runs/${runId}/artifacts`);
 }
 
 export async function getArtifactContent(runId: string, artifactId: string): Promise<ArtifactContentResponse> {
   return apiRequest<ArtifactContentResponse>(`/api/runs/${runId}/artifacts/${artifactId}/content`);
+}
+
+export async function getRunReview(runId: string): Promise<RunReviewResponse> {
+  return apiRequest<RunReviewResponse>(`/api/runs/${runId}/review`);
+}
+
+export async function upsertRunReview(
+  runId: string,
+  input: {
+    reviewer: string;
+    decision: "APPROVE" | "REQUEST_CHANGES" | "REJECT" | "EXCEPTION";
+    checklist: RunReviewChecklist;
+    summary?: string;
+    criticalFindings?: string;
+    artifactFindings?: string;
+    attestation?: string;
+  }
+): Promise<{ review: RunReviewResponse["review"] }> {
+  return apiRequest<{ review: RunReviewResponse["review"] }>(`/api/runs/${runId}/review`, {
+    method: "PUT",
+    body: JSON.stringify(input)
+  });
 }

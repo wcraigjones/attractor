@@ -1,12 +1,36 @@
 import express from "express";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { Readable } from "node:stream";
 import { KubeConfig, CoreV1Api } from "@kubernetes/client-node";
 import { App as GitHubApp } from "@octokit/app";
-import { AttractorScope, EnvironmentKind, PrismaClient, RunStatus, RunType } from "@prisma/client";
+import {
+  AttractorScope,
+  EnvironmentKind,
+  PrismaClient,
+  ReviewDecision,
+  RunQuestionStatus,
+  RunStatus,
+  RunType
+} from "@prisma/client";
 import { Redis } from "ioredis";
 import { getModels, getProviders } from "@mariozechner/pi-ai";
-import { GetObjectCommand, HeadObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import {
+  CreateBucketCommand,
+  GetObjectCommand,
+  HeadBucketCommand,
+  HeadObjectCommand,
+  PutObjectCommand,
+  S3Client
+} from "@aws-sdk/client-s3";
 import { z } from "zod";
+import {
+  lintDotGraph,
+  parseDotGraph,
+  serializeDotGraphCanonical,
+  type DotDiagnostic
+} from "@attractor/dot-engine";
 import {
   type EnvironmentResources,
   type RunExecutionEnvironment,
@@ -23,12 +47,40 @@ import {
   toProjectNamespace
 } from "@attractor/shared-k8s";
 import { clampPreviewBytes, isProbablyText, isTextByMetadata } from "./artifact-preview.js";
+import {
+  checkConclusionForDecision,
+  effectiveReviewDecision,
+  githubSyncConfigFromEnv,
+  hasFeedbackText,
+  inferPrRiskLevel,
+  issueTargetBranch,
+  parseIssueNumbers,
+  reviewSummaryMarkdown,
+  verifyGitHubWebhookSignature
+} from "./github-sync.js";
+import {
+  type ReviewCriticalSection,
+  defaultReviewChecklistValue,
+  extractCriticalSectionsFromDiff,
+  rankReviewArtifacts,
+  reviewChecklistTemplate,
+  reviewSlaStatus,
+  RUN_REVIEW_FRAMEWORK_VERSION,
+  summarizeImplementationNote
+} from "./run-review.js";
 
 const prisma = new PrismaClient();
 const redis = new Redis(process.env.REDIS_URL ?? "redis://127.0.0.1:6379");
 
 const app = express();
-app.use(express.json({ limit: "2mb" }));
+const jsonBodyParser = express.json({ limit: "2mb" });
+app.use((req, res, next) => {
+  if (req.path === "/api/github/webhooks") {
+    next();
+    return;
+  }
+  jsonBodyParser(req, res, next);
+});
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
@@ -49,6 +101,7 @@ const DEFAULT_ENVIRONMENT_NAME = process.env.DEFAULT_ENVIRONMENT_NAME ?? "defaul
 const GLOBAL_SECRET_NAMESPACE =
   process.env.GLOBAL_SECRET_NAMESPACE ?? process.env.FACTORY_SYSTEM_NAMESPACE ?? "factory-system";
 const MINIO_BUCKET = process.env.MINIO_BUCKET ?? "factory-artifacts";
+const githubSyncConfig = githubSyncConfigFromEnv(process.env);
 const digestPinnedImagePattern = /@sha256:[a-f0-9]{64}$/;
 const environmentResourcesSchema = z.object({
   requests: z
@@ -100,6 +153,254 @@ async function getArtifactByRun(runId: string, artifactId: string) {
       runId
     }
   });
+}
+
+async function getObjectText(key: string): Promise<string | null> {
+  try {
+    const output = await minioClient.send(
+      new GetObjectCommand({
+        Bucket: MINIO_BUCKET,
+        Key: key
+      })
+    );
+    if (!output.Body) {
+      return null;
+    }
+    const bytes = await bodyToBuffer(output.Body);
+    return bytes.toString("utf8");
+  } catch {
+    return null;
+  }
+}
+
+let attractorBucketReady = false;
+
+async function ensureAttractorBucket(): Promise<void> {
+  if (attractorBucketReady) {
+    return;
+  }
+
+  try {
+    await minioClient.send(new HeadBucketCommand({ Bucket: MINIO_BUCKET }));
+    attractorBucketReady = true;
+    return;
+  } catch (error) {
+    const status = (error as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode;
+    const name = (error as { name?: string })?.name;
+    if (status === 404 || name === "NotFound" || name === "NoSuchBucket") {
+      await minioClient.send(new CreateBucketCommand({ Bucket: MINIO_BUCKET }));
+      attractorBucketReady = true;
+      return;
+    }
+    throw error;
+  }
+}
+
+function sanitizeAttractorName(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "") || "attractor";
+}
+
+function digestText(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function attractorObjectPath(args: {
+  scope: "global" | "project";
+  name: string;
+  version: number;
+  projectId?: string;
+}): string {
+  const safeName = sanitizeAttractorName(args.name);
+  if (args.scope === "global") {
+    return `attractors/global/${safeName}/v${args.version}.dot`;
+  }
+  if (!args.projectId) {
+    throw new Error("projectId is required for project attractor object paths");
+  }
+  return `attractors/projects/${args.projectId}/${safeName}/v${args.version}.dot`;
+}
+
+async function putAttractorContent(objectPath: string, content: string): Promise<void> {
+  await ensureAttractorBucket();
+  await minioClient.send(
+    new PutObjectCommand({
+      Bucket: MINIO_BUCKET,
+      Key: objectPath,
+      Body: content,
+      ContentType: "text/vnd.graphviz"
+    })
+  );
+}
+
+function toNullableText(value: string | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+interface AttractorValidationPayload {
+  valid: boolean;
+  errorCount: number;
+  warningCount: number;
+  diagnostics: DotDiagnostic[];
+}
+
+function parseAndLintAttractorContent(content: string): {
+  content: string;
+  validation: AttractorValidationPayload;
+} {
+  const trimmed = content.trim();
+  if (trimmed.length === 0) {
+    return {
+      content: "",
+      validation: {
+        valid: false,
+        errorCount: 1,
+        warningCount: 0,
+        diagnostics: [
+          {
+            rule: "content_required",
+            severity: "ERROR",
+            message: "Attractor content must not be empty"
+          }
+        ]
+      }
+    };
+  }
+
+  try {
+    const parsed = parseDotGraph(trimmed);
+    const diagnostics = lintDotGraph(parsed);
+    const errorCount = diagnostics.filter((item) => item.severity === "ERROR").length;
+    const warningCount = diagnostics.filter((item) => item.severity === "WARNING").length;
+    const canonical = serializeDotGraphCanonical(parsed);
+    return {
+      content: canonical,
+      validation: {
+        valid: errorCount === 0,
+        errorCount,
+        warningCount,
+        diagnostics
+      }
+    };
+  } catch (error) {
+    return {
+      content: trimmed,
+      validation: {
+        valid: false,
+        errorCount: 1,
+        warningCount: 0,
+        diagnostics: [
+          {
+            rule: "parse_error",
+            severity: "ERROR",
+            message: error instanceof Error ? error.message : String(error)
+          }
+        ]
+      }
+    };
+  }
+}
+
+async function loadAttractorContentFromStorage(contentPath: string | null): Promise<string | null> {
+  if (!contentPath) {
+    return null;
+  }
+  return getObjectText(contentPath);
+}
+
+function ensureAttractorContentValid(validation: AttractorValidationPayload): void {
+  if (validation.valid) {
+    return;
+  }
+  const message = validation.diagnostics
+    .filter((item) => item.severity === "ERROR")
+    .map((item) => item.message)
+    .join("; ");
+  throw new Error(message.length > 0 ? message : "attractor content failed validation");
+}
+
+async function resolveAttractorSnapshotForRun(attractor: {
+  id: string;
+  name: string;
+  scope: AttractorScope;
+  contentPath: string | null;
+  contentVersion: number;
+}): Promise<{ contentPath: string; contentVersion: number; contentSha256: string }> {
+  if (!attractor.contentPath || attractor.contentVersion <= 0) {
+    throw new Error(
+      `Attractor ${attractor.name} is legacy-only (repoPath) and cannot be used for new runs`
+    );
+  }
+
+  const versionRecord = await prisma.attractorDefVersion.findUnique({
+    where: {
+      attractorDefId_version: {
+        attractorDefId: attractor.id,
+        version: attractor.contentVersion
+      }
+    }
+  });
+
+  if (versionRecord) {
+    return {
+      contentPath: attractor.contentPath,
+      contentVersion: attractor.contentVersion,
+      contentSha256: versionRecord.contentSha256
+    };
+  }
+
+  if (attractor.scope === AttractorScope.GLOBAL) {
+    const global = await prisma.globalAttractor.findUnique({
+      where: { name: attractor.name },
+      select: { id: true }
+    });
+    if (global) {
+      const globalVersion = await prisma.globalAttractorVersion.findUnique({
+        where: {
+          globalAttractorId_version: {
+            globalAttractorId: global.id,
+            version: attractor.contentVersion
+          }
+        }
+      });
+      if (globalVersion) {
+        return {
+          contentPath: attractor.contentPath,
+          contentVersion: attractor.contentVersion,
+          contentSha256: globalVersion.contentSha256
+        };
+      }
+    }
+  }
+
+  const content = await loadAttractorContentFromStorage(attractor.contentPath);
+  if (!content) {
+    throw new Error(`Attractor storage content not found at ${attractor.contentPath}`);
+  }
+
+  return {
+    contentPath: attractor.contentPath,
+    contentVersion: attractor.contentVersion,
+    contentSha256: digestText(content)
+  };
+}
+
+function normalizeStoredChecklist(raw: unknown) {
+  const base = defaultReviewChecklistValue();
+  if (!raw || typeof raw !== "object") {
+    return base;
+  }
+
+  const parsed = raw as Record<string, unknown>;
+  return {
+    summaryReviewed: parsed.summaryReviewed === true,
+    criticalCodeReviewed: parsed.criticalCodeReviewed === true,
+    artifactsReviewed: parsed.artifactsReviewed === true,
+    functionalValidationReviewed: parsed.functionalValidationReviewed === true
+  };
 }
 
 function hasProvider(provider: string): boolean {
@@ -354,7 +655,9 @@ async function upsertGlobalAttractorForProject(
   projectId: string,
   attractor: {
     name: string;
-    repoPath: string;
+    repoPath: string | null;
+    contentPath: string | null;
+    contentVersion: number;
     defaultRunType: RunType;
     description: string | null;
     active: boolean;
@@ -370,6 +673,8 @@ async function upsertGlobalAttractorForProject(
     },
     update: {
       repoPath: attractor.repoPath,
+      contentPath: attractor.contentPath,
+      contentVersion: attractor.contentVersion,
       defaultRunType: attractor.defaultRunType,
       description: attractor.description,
       active: attractor.active
@@ -379,6 +684,8 @@ async function upsertGlobalAttractorForProject(
       scope: AttractorScope.GLOBAL,
       name: attractor.name,
       repoPath: attractor.repoPath,
+      contentPath: attractor.contentPath,
+      contentVersion: attractor.contentVersion,
       defaultRunType: attractor.defaultRunType,
       description: attractor.description,
       active: attractor.active
@@ -395,7 +702,9 @@ async function syncGlobalAttractorsToProject(projectId: string): Promise<void> {
 
 async function propagateGlobalAttractorToAllProjects(attractor: {
   name: string;
-  repoPath: string;
+  repoPath: string | null;
+  contentPath: string | null;
+  contentVersion: number;
   defaultRunType: RunType;
   description: string | null;
   active: boolean;
@@ -456,6 +765,452 @@ function githubApp(): GitHubApp | null {
     appId,
     privateKey: privateKey.replace(/\\n/g, "\n")
   });
+}
+
+function parseRepoFullName(repoFullName: string): { owner: string; repo: string } | null {
+  const [owner, repo] = repoFullName.split("/");
+  if (!owner || !repo) {
+    return null;
+  }
+  return { owner, repo };
+}
+
+function toNullableIsoDate(value: string | null | undefined): Date | null {
+  if (!value) {
+    return null;
+  }
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function normalizeIssueLabels(
+  labels: Array<string | { name?: string | null } | null | undefined> | null | undefined
+): string[] {
+  if (!Array.isArray(labels)) {
+    return [];
+  }
+  const normalized = labels
+    .map((entry) => {
+      if (!entry) {
+        return "";
+      }
+      if (typeof entry === "string") {
+        return entry.trim();
+      }
+      return typeof entry.name === "string" ? entry.name.trim() : "";
+    })
+    .filter((item) => item.length > 0);
+  return [...new Set(normalized)].sort((a, b) => a.localeCompare(b));
+}
+
+async function upsertGitHubIssueForProject(input: {
+  projectId: string;
+  issue: {
+    number: number;
+    state: string;
+    title: string;
+    body?: string | null;
+    user?: { login?: string | null } | null;
+    labels?: Array<string | { name?: string | null } | null> | null;
+    assignees?: Array<{ login?: string | null } | null> | null;
+    html_url: string;
+    created_at: string;
+    closed_at?: string | null;
+    updated_at: string;
+  };
+}) {
+  const issue = input.issue;
+  const assignees = (issue.assignees ?? [])
+    .map((item) => item?.login?.trim() ?? "")
+    .filter((item) => item.length > 0);
+
+  const openedAt = toNullableIsoDate(issue.created_at) ?? new Date();
+  const updatedAt = toNullableIsoDate(issue.updated_at) ?? new Date();
+
+  return prisma.gitHubIssue.upsert({
+    where: {
+      projectId_issueNumber: {
+        projectId: input.projectId,
+        issueNumber: issue.number
+      }
+    },
+    update: {
+      state: issue.state,
+      title: issue.title,
+      body: issue.body ?? null,
+      author: issue.user?.login ?? null,
+      labelsJson: normalizeIssueLabels(issue.labels) as never,
+      assigneesJson: assignees as never,
+      url: issue.html_url,
+      openedAt,
+      closedAt: toNullableIsoDate(issue.closed_at),
+      updatedAt,
+      syncedAt: new Date()
+    },
+    create: {
+      projectId: input.projectId,
+      issueNumber: issue.number,
+      state: issue.state,
+      title: issue.title,
+      body: issue.body ?? null,
+      author: issue.user?.login ?? null,
+      labelsJson: normalizeIssueLabels(issue.labels) as never,
+      assigneesJson: assignees as never,
+      url: issue.html_url,
+      openedAt,
+      closedAt: toNullableIsoDate(issue.closed_at),
+      updatedAt,
+      syncedAt: new Date()
+    }
+  });
+}
+
+async function resolveLinkedIssueIdForPullRequest(input: {
+  projectId: string;
+  title: string;
+  body?: string | null;
+}): Promise<string | null> {
+  const refs = parseIssueNumbers(`${input.title}\n${input.body ?? ""}`);
+  if (refs.length === 0) {
+    return null;
+  }
+  const issue = await prisma.gitHubIssue.findFirst({
+    where: {
+      projectId: input.projectId,
+      issueNumber: { in: refs }
+    },
+    orderBy: { issueNumber: "asc" }
+  });
+  return issue?.id ?? null;
+}
+
+async function upsertGitHubPullRequestForProject(input: {
+  projectId: string;
+  pullRequest: {
+    number: number;
+    state: string;
+    title: string;
+    body?: string | null;
+    html_url: string;
+    head: { ref: string; sha: string };
+    base: { ref: string };
+    created_at: string;
+    closed_at?: string | null;
+    merged_at?: string | null;
+    updated_at: string;
+  };
+}) {
+  const pr = input.pullRequest;
+  const linkedIssueId = await resolveLinkedIssueIdForPullRequest({
+    projectId: input.projectId,
+    title: pr.title,
+    body: pr.body ?? null
+  });
+  const openedAt = toNullableIsoDate(pr.created_at) ?? new Date();
+  const updatedAt = toNullableIsoDate(pr.updated_at) ?? new Date();
+
+  return prisma.gitHubPullRequest.upsert({
+    where: {
+      projectId_prNumber: {
+        projectId: input.projectId,
+        prNumber: pr.number
+      }
+    },
+    update: {
+      state: pr.state,
+      title: pr.title,
+      body: pr.body ?? null,
+      url: pr.html_url,
+      headRefName: pr.head.ref,
+      headSha: pr.head.sha,
+      baseRefName: pr.base.ref,
+      mergedAt: toNullableIsoDate(pr.merged_at),
+      openedAt,
+      closedAt: toNullableIsoDate(pr.closed_at),
+      updatedAt,
+      syncedAt: new Date(),
+      linkedIssueId
+    },
+    create: {
+      projectId: input.projectId,
+      prNumber: pr.number,
+      state: pr.state,
+      title: pr.title,
+      body: pr.body ?? null,
+      url: pr.html_url,
+      headRefName: pr.head.ref,
+      headSha: pr.head.sha,
+      baseRefName: pr.base.ref,
+      mergedAt: toNullableIsoDate(pr.merged_at),
+      openedAt,
+      closedAt: toNullableIsoDate(pr.closed_at),
+      updatedAt,
+      syncedAt: new Date(),
+      linkedIssueId
+    }
+  });
+}
+
+async function getInstallationOctokit(installationId: string) {
+  const app = githubApp();
+  if (!app) {
+    throw new Error("GitHub App credentials are not configured");
+  }
+  return app.getInstallationOctokit(Number(installationId));
+}
+
+async function reconcileProjectGitHub(projectId: string): Promise<{
+  issuesSynced: number;
+  pullRequestsSynced: number;
+}> {
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
+    include: { githubSyncState: true }
+  });
+  if (!project) {
+    throw new Error("project not found");
+  }
+  if (!githubSyncConfig.enabled) {
+    throw new Error("GitHub sync is disabled");
+  }
+  if (!project.githubInstallationId || !project.repoFullName) {
+    throw new Error("project/github installation not found");
+  }
+
+  const parsedRepo = parseRepoFullName(project.repoFullName);
+  if (!parsedRepo) {
+    throw new Error(`invalid repo full name ${project.repoFullName}`);
+  }
+
+  const octokit = await getInstallationOctokit(project.githubInstallationId);
+  const now = new Date();
+  const sinceIso = project.githubSyncState?.issuesCursor ?? undefined;
+
+  let issuesSynced = 0;
+  let pullRequestsSynced = 0;
+  try {
+    const issuesResponse = await octokit.request("GET /repos/{owner}/{repo}/issues", {
+      owner: parsedRepo.owner,
+      repo: parsedRepo.repo,
+      state: "all",
+      per_page: 100,
+      ...(sinceIso ? { since: sinceIso } : {})
+    });
+    const issues = issuesResponse.data as Array<any>;
+
+    for (const issue of issues) {
+      // Pull requests are returned by this endpoint; ignore them here.
+      if ("pull_request" in issue) {
+        continue;
+      }
+      await upsertGitHubIssueForProject({
+        projectId: project.id,
+        issue: {
+          number: issue.number,
+          state: issue.state,
+          title: issue.title,
+          body: issue.body,
+          user: issue.user ? { login: issue.user.login } : null,
+          labels: issue.labels as Array<string | { name?: string | null } | null>,
+          assignees: issue.assignees?.map((assignee: { login?: string | null }) => ({ login: assignee?.login })),
+          html_url: issue.html_url,
+          created_at: issue.created_at,
+          closed_at: issue.closed_at,
+          updated_at: issue.updated_at
+        }
+      });
+      issuesSynced += 1;
+    }
+
+    const pullsResponse = await octokit.request("GET /repos/{owner}/{repo}/pulls", {
+      owner: parsedRepo.owner,
+      repo: parsedRepo.repo,
+      state: "all",
+      sort: "updated",
+      direction: "desc",
+      per_page: 100
+    });
+    const pulls = pullsResponse.data as Array<any>;
+
+    for (const pull of pulls) {
+      await upsertGitHubPullRequestForProject({
+        projectId: project.id,
+        pullRequest: {
+          number: pull.number,
+          state: pull.state,
+          title: pull.title,
+          body: pull.body,
+          html_url: pull.html_url,
+          head: { ref: pull.head.ref, sha: pull.head.sha },
+          base: { ref: pull.base.ref },
+          created_at: pull.created_at,
+          closed_at: pull.closed_at,
+          merged_at: pull.merged_at,
+          updated_at: pull.updated_at
+        }
+      });
+      pullRequestsSynced += 1;
+    }
+
+    await prisma.gitHubSyncState.upsert({
+      where: { projectId: project.id },
+      update: {
+        issuesCursor: now.toISOString(),
+        pullsCursor: now.toISOString(),
+        lastIssueSyncAt: now,
+        lastPullSyncAt: now,
+        lastError: null
+      },
+      create: {
+        projectId: project.id,
+        issuesCursor: now.toISOString(),
+        pullsCursor: now.toISOString(),
+        lastIssueSyncAt: now,
+        lastPullSyncAt: now,
+        lastError: null
+      }
+    });
+  } catch (error) {
+    await prisma.gitHubSyncState.upsert({
+      where: { projectId: project.id },
+      update: {
+        lastError: error instanceof Error ? error.message : String(error)
+      },
+      create: {
+        projectId: project.id,
+        lastError: error instanceof Error ? error.message : String(error)
+      }
+    });
+    throw error;
+  }
+
+  return {
+    issuesSynced,
+    pullRequestsSynced
+  };
+}
+
+async function buildRunReviewPack(runId: string) {
+  const run = await prisma.run.findUnique({
+    where: { id: runId },
+    include: {
+      review: true,
+      githubPullRequest: true
+    }
+  });
+  if (!run) {
+    return null;
+  }
+
+  const artifacts = await prisma.artifact.findMany({
+    where: { runId: run.id },
+    orderBy: { createdAt: "asc" }
+  });
+  const rankedArtifacts = rankReviewArtifacts(artifacts);
+  const implementationPatchArtifact = artifacts.find((artifact) => artifact.key === "implementation.patch");
+  const implementationNoteArtifact = artifacts.find((artifact) => artifact.key === "implementation-note.md");
+
+  let criticalSections: ReviewCriticalSection[] = [];
+  if (implementationPatchArtifact) {
+    const patchText = await getObjectText(implementationPatchArtifact.path);
+    if (patchText) {
+      criticalSections = extractCriticalSectionsFromDiff(patchText);
+    }
+  }
+
+  let summarySuggestion = "";
+  if (implementationNoteArtifact) {
+    const noteText = await getObjectText(implementationNoteArtifact.path);
+    if (noteText) {
+      summarySuggestion = summarizeImplementationNote(noteText);
+    }
+  }
+
+  const sla = reviewSlaStatus(run.createdAt);
+  return {
+    run,
+    review: run.review,
+    checklistTemplate: reviewChecklistTemplate(),
+    pack: {
+      dueAt: sla.dueAt.toISOString(),
+      overdue: sla.overdue,
+      minutesRemaining: sla.minutesRemaining,
+      summarySuggestion,
+      artifactFocus: rankedArtifacts.slice(0, 8),
+      criticalSections: criticalSections.slice(0, 20)
+    }
+  };
+}
+
+async function postReviewWriteback(reviewId: string): Promise<{
+  githubCheckRunId: string | null;
+  githubSummaryCommentId: string | null;
+}> {
+  const review = await prisma.runReview.findUnique({
+    where: { id: reviewId },
+    include: {
+      run: {
+        include: {
+          project: true,
+          githubPullRequest: true
+        }
+      }
+    }
+  });
+  if (!review) {
+    throw new Error("review not found");
+  }
+  if (!review.run.githubPullRequest || !review.run.project.repoFullName || !review.run.project.githubInstallationId) {
+    return { githubCheckRunId: null, githubSummaryCommentId: null };
+  }
+
+  const parsed = parseRepoFullName(review.run.project.repoFullName);
+  if (!parsed) {
+    throw new Error(`Invalid repo full name ${review.run.project.repoFullName}`);
+  }
+
+  const octokit = await getInstallationOctokit(review.run.project.githubInstallationId);
+  const check = await octokit.request("POST /repos/{owner}/{repo}/check-runs", {
+    owner: parsed.owner,
+    repo: parsed.repo,
+    name: "Attractor Review",
+    head_sha: review.reviewedHeadSha ?? review.run.githubPullRequest.headSha,
+    status: "completed",
+    conclusion: checkConclusionForDecision(review.decision),
+    output: {
+      title: `Review ${review.decision}`,
+      summary: (review.summary ?? "").slice(0, 65535),
+      text: reviewSummaryMarkdown({
+        runId: review.run.id,
+        reviewer: review.reviewer,
+        decision: review.decision,
+        summary: review.summary,
+        criticalFindings: review.criticalFindings,
+        artifactFindings: review.artifactFindings,
+        reviewedAtIso: review.reviewedAt.toISOString()
+      }).slice(0, 65535)
+    }
+  });
+
+  const comment = await octokit.request("POST /repos/{owner}/{repo}/issues/{issue_number}/comments", {
+    owner: parsed.owner,
+    repo: parsed.repo,
+    issue_number: review.run.githubPullRequest.prNumber,
+    body: reviewSummaryMarkdown({
+      runId: review.run.id,
+      reviewer: review.reviewer,
+      decision: review.decision,
+      summary: review.summary,
+      criticalFindings: review.criticalFindings,
+      artifactFindings: review.artifactFindings,
+      reviewedAtIso: review.reviewedAt.toISOString()
+    })
+  });
+
+  return {
+    githubCheckRunId: String(check.data.id),
+    githubSummaryCommentId: String(comment.data.id)
+  };
 }
 
 function sendError(res: express.Response, status: number, error: string) {
@@ -688,7 +1443,8 @@ const bootstrapSelfSchema = z.object({
   defaultBranch: z.string().min(1).default("main"),
   installationId: z.string().min(1).optional(),
   attractorName: z.string().min(1).default("self-factory"),
-  attractorPath: z.string().min(1).default("factory/self-bootstrap.dot")
+  attractorPath: z.string().min(1).default("factory/self-bootstrap.dot"),
+  attractorContent: z.string().min(1).optional()
 });
 
 app.post("/api/bootstrap/self", async (req, res) => {
@@ -746,6 +1502,72 @@ app.post("/api/bootstrap/self", async (req, res) => {
   await syncGlobalSecretsToNamespace(namespace);
   await syncGlobalAttractorsToProject(effectiveProject.id);
 
+  let bootstrapAttractorContent = toNullableText(input.data.attractorContent);
+  if (!bootstrapAttractorContent) {
+    const absolutePath = join(process.cwd(), input.data.attractorPath);
+    try {
+      bootstrapAttractorContent = readFileSync(absolutePath, "utf8");
+    } catch (error) {
+      return sendError(
+        res,
+        400,
+        `unable to load bootstrap attractor content from ${input.data.attractorPath}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+  const bootstrapParsed = parseAndLintAttractorContent(bootstrapAttractorContent);
+  if (!bootstrapParsed.validation.valid) {
+    const message = bootstrapParsed.validation.diagnostics
+      .filter((item) => item.severity === "ERROR")
+      .map((item) => item.message)
+      .join("; ");
+    return sendError(res, 400, `bootstrap attractor content failed validation: ${message}`);
+  }
+  bootstrapAttractorContent = bootstrapParsed.content;
+
+  const existingBootstrapAttractor = await prisma.attractorDef.findUnique({
+    where: {
+      projectId_name_scope: {
+        projectId: effectiveProject.id,
+        name: input.data.attractorName,
+        scope: AttractorScope.PROJECT
+      }
+    }
+  });
+  const currentVersion = existingBootstrapAttractor?.contentVersion ?? 0;
+  const latestVersion =
+    existingBootstrapAttractor && currentVersion > 0
+      ? await prisma.attractorDefVersion.findUnique({
+          where: {
+            attractorDefId_version: {
+              attractorDefId: existingBootstrapAttractor.id,
+              version: currentVersion
+            }
+          }
+        })
+      : null;
+  const contentSha256 = digestText(bootstrapAttractorContent);
+  const needsNewVersion =
+    !existingBootstrapAttractor ||
+    !existingBootstrapAttractor.contentPath ||
+    currentVersion <= 0 ||
+    latestVersion?.contentSha256 !== contentSha256;
+
+  let contentPath = existingBootstrapAttractor?.contentPath ?? null;
+  let contentVersion = currentVersion;
+  if (needsNewVersion) {
+    contentVersion = Math.max(currentVersion, 0) + 1;
+    contentPath = attractorObjectPath({
+      scope: "project",
+      projectId: effectiveProject.id,
+      name: input.data.attractorName,
+      version: contentVersion
+    });
+    await putAttractorContent(contentPath, bootstrapAttractorContent);
+  }
+
   const attractor = await prisma.attractorDef.upsert({
     where: {
       projectId_name_scope: {
@@ -756,6 +1578,8 @@ app.post("/api/bootstrap/self", async (req, res) => {
     },
     update: {
       repoPath: input.data.attractorPath,
+      contentPath,
+      contentVersion,
       defaultRunType: "planning",
       active: true,
       description: "Self-bootstrap attractor pipeline for this repository"
@@ -765,11 +1589,25 @@ app.post("/api/bootstrap/self", async (req, res) => {
       scope: AttractorScope.PROJECT,
       name: input.data.attractorName,
       repoPath: input.data.attractorPath,
+      contentPath,
+      contentVersion,
       defaultRunType: "planning",
       active: true,
       description: "Self-bootstrap attractor pipeline for this repository"
     }
   });
+
+  if (needsNewVersion && contentPath) {
+    await prisma.attractorDefVersion.create({
+      data: {
+        attractorDefId: attractor.id,
+        version: contentVersion,
+        contentPath,
+        contentSha256,
+        sizeBytes: Buffer.byteLength(bootstrapAttractorContent, "utf8")
+      }
+    });
+  }
 
   res.status(201).json({ project: effectiveProject, attractor });
 });
@@ -961,11 +1799,72 @@ app.get("/api/projects/:projectId/secrets", async (req, res) => {
 
 const createAttractorSchema = z.object({
   name: z.string().min(1),
-  repoPath: z.string().min(1),
-  defaultRunType: z.enum(["planning", "implementation"]),
+  content: z.string().min(1),
+  repoPath: z.string().optional(),
+  defaultRunType: z.enum(["planning", "implementation", "task"]),
   description: z.string().optional(),
   active: z.boolean().optional()
 });
+
+const patchAttractorSchema = z
+  .object({
+    name: z.string().min(1).optional(),
+    content: z.string().optional(),
+    repoPath: z.string().nullable().optional(),
+    defaultRunType: z.enum(["planning", "implementation", "task"]).optional(),
+    description: z.string().nullable().optional(),
+    active: z.boolean().optional(),
+    expectedContentVersion: z.number().int().nonnegative().optional()
+  })
+  .refine((value) => Object.keys(value).length > 0, { message: "at least one field is required" });
+
+async function buildAttractorContentPayload(contentPath: string | null): Promise<{
+  content: string | null;
+  validation: AttractorValidationPayload;
+}> {
+  if (!contentPath) {
+    return {
+      content: null,
+      validation: {
+        valid: false,
+        errorCount: 1,
+        warningCount: 0,
+        diagnostics: [
+          {
+            rule: "legacy_content_source",
+            severity: "ERROR",
+            message: "Attractor has no storage-backed content (legacy repoPath only)."
+          }
+        ]
+      }
+    };
+  }
+
+  const stored = await loadAttractorContentFromStorage(contentPath);
+  if (!stored) {
+    return {
+      content: null,
+      validation: {
+        valid: false,
+        errorCount: 1,
+        warningCount: 0,
+        diagnostics: [
+          {
+            rule: "storage_content_missing",
+            severity: "ERROR",
+            message: `Attractor content missing at storage path ${contentPath}`
+          }
+        ]
+      }
+    };
+  }
+
+  const parsed = parseAndLintAttractorContent(stored);
+  return {
+    content: parsed.content,
+    validation: parsed.validation
+  };
+}
 
 app.post("/api/attractors/global", async (req, res) => {
   const input = createAttractorSchema.safeParse(req.body);
@@ -973,24 +1872,80 @@ app.post("/api/attractors/global", async (req, res) => {
     return sendError(res, 400, input.error.message);
   }
 
+  const parsed = parseAndLintAttractorContent(input.data.content);
+  if (!parsed.validation.valid) {
+    return res.status(400).json({
+      error: "attractor content failed validation",
+      validation: parsed.validation
+    });
+  }
+  const content = parsed.content;
+
+  const existing = await prisma.globalAttractor.findUnique({
+    where: { name: input.data.name }
+  });
+  const currentVersion = existing?.contentVersion ?? 0;
+  const latestVersion =
+    existing && currentVersion > 0
+      ? await prisma.globalAttractorVersion.findUnique({
+          where: {
+            globalAttractorId_version: {
+              globalAttractorId: existing.id,
+              version: currentVersion
+            }
+          }
+        })
+      : null;
+  const contentSha256 = digestText(content);
+  const needsNewVersion =
+    !existing || !existing.contentPath || currentVersion <= 0 || latestVersion?.contentSha256 !== contentSha256;
+
+  let contentPath = existing?.contentPath ?? null;
+  let contentVersion = currentVersion;
+  if (needsNewVersion) {
+    contentVersion = Math.max(currentVersion, 0) + 1;
+    contentPath = attractorObjectPath({
+      scope: "global",
+      name: input.data.name,
+      version: contentVersion
+    });
+    await putAttractorContent(contentPath, content);
+  }
+
   const saved = await prisma.globalAttractor.upsert({
     where: {
       name: input.data.name
     },
     update: {
-      repoPath: input.data.repoPath,
+      repoPath: toNullableText(input.data.repoPath),
+      contentPath,
+      contentVersion,
       defaultRunType: input.data.defaultRunType,
       description: input.data.description,
       ...(input.data.active !== undefined ? { active: input.data.active } : {})
     },
     create: {
       name: input.data.name,
-      repoPath: input.data.repoPath,
+      repoPath: toNullableText(input.data.repoPath),
+      contentPath,
+      contentVersion,
       defaultRunType: input.data.defaultRunType,
       description: input.data.description,
       active: input.data.active ?? true
     }
   });
+
+  if (needsNewVersion && contentPath) {
+    await prisma.globalAttractorVersion.create({
+      data: {
+        globalAttractorId: saved.id,
+        version: contentVersion,
+        contentPath,
+        contentSha256,
+        sizeBytes: Buffer.byteLength(content, "utf8")
+      }
+    });
+  }
 
   await propagateGlobalAttractorToAllProjects(saved);
 
@@ -1004,25 +1959,280 @@ app.get("/api/attractors/global", async (_req, res) => {
   res.json({ attractors });
 });
 
+app.get("/api/attractors/global/:attractorId", async (req, res) => {
+  const attractor = await prisma.globalAttractor.findUnique({
+    where: { id: req.params.attractorId }
+  });
+  if (!attractor) {
+    return sendError(res, 404, "global attractor not found");
+  }
+
+  const payload = await buildAttractorContentPayload(attractor.contentPath);
+  res.json({
+    attractor,
+    content: payload.content,
+    validation: payload.validation
+  });
+});
+
+app.get("/api/attractors/global/:attractorId/versions", async (req, res) => {
+  const attractor = await prisma.globalAttractor.findUnique({
+    where: { id: req.params.attractorId },
+    select: { id: true }
+  });
+  if (!attractor) {
+    return sendError(res, 404, "global attractor not found");
+  }
+
+  const versions = await prisma.globalAttractorVersion.findMany({
+    where: { globalAttractorId: attractor.id },
+    orderBy: { version: "desc" }
+  });
+  res.json({ versions });
+});
+
+app.get("/api/attractors/global/:attractorId/versions/:version", async (req, res) => {
+  const version = Number.parseInt(req.params.version, 10);
+  if (!Number.isInteger(version) || version <= 0) {
+    return sendError(res, 400, "version must be a positive integer");
+  }
+
+  const attractor = await prisma.globalAttractor.findUnique({
+    where: { id: req.params.attractorId },
+    select: { id: true }
+  });
+  if (!attractor) {
+    return sendError(res, 404, "global attractor not found");
+  }
+
+  const versionRow = await prisma.globalAttractorVersion.findUnique({
+    where: {
+      globalAttractorId_version: {
+        globalAttractorId: attractor.id,
+        version
+      }
+    }
+  });
+  if (!versionRow) {
+    return sendError(res, 404, "global attractor version not found");
+  }
+
+  const payload = await buildAttractorContentPayload(versionRow.contentPath);
+  res.json({
+    version: versionRow,
+    content: payload.content,
+    validation: payload.validation
+  });
+});
+
+app.patch("/api/attractors/global/:attractorId", async (req, res) => {
+  const input = patchAttractorSchema.safeParse(req.body);
+  if (!input.success) {
+    return sendError(res, 400, input.error.message);
+  }
+
+  const current = await prisma.globalAttractor.findUnique({
+    where: { id: req.params.attractorId }
+  });
+  if (!current) {
+    return sendError(res, 404, "global attractor not found");
+  }
+
+  if (
+    input.data.expectedContentVersion !== undefined &&
+    current.contentVersion !== input.data.expectedContentVersion
+  ) {
+    return sendError(
+      res,
+      409,
+      `content version mismatch: expected ${input.data.expectedContentVersion}, current ${current.contentVersion}`
+    );
+  }
+
+  let nextContentPath = current.contentPath;
+  let nextContentVersion = current.contentVersion;
+  let parsedContent: string | null = null;
+  let parsedValidation: AttractorValidationPayload | null = null;
+
+  if (input.data.content !== undefined) {
+    const parsed = parseAndLintAttractorContent(input.data.content);
+    parsedContent = parsed.content;
+    parsedValidation = parsed.validation;
+    if (!parsed.validation.valid) {
+      return res.status(400).json({
+        error: "attractor content failed validation",
+        validation: parsed.validation
+      });
+    }
+
+    const latestVersion =
+      current.contentVersion > 0
+        ? await prisma.globalAttractorVersion.findUnique({
+            where: {
+              globalAttractorId_version: {
+                globalAttractorId: current.id,
+                version: current.contentVersion
+              }
+            }
+          })
+        : null;
+    const contentSha256 = digestText(parsed.content);
+    const needsNewVersion =
+      !current.contentPath ||
+      current.contentVersion <= 0 ||
+      !latestVersion ||
+      latestVersion.contentSha256 !== contentSha256;
+
+    if (needsNewVersion) {
+      nextContentVersion = Math.max(current.contentVersion, 0) + 1;
+      nextContentPath = attractorObjectPath({
+        scope: "global",
+        name: input.data.name ?? current.name,
+        version: nextContentVersion
+      });
+      await putAttractorContent(nextContentPath, parsed.content);
+      await prisma.globalAttractorVersion.create({
+        data: {
+          globalAttractorId: current.id,
+          version: nextContentVersion,
+          contentPath: nextContentPath,
+          contentSha256,
+          sizeBytes: Buffer.byteLength(parsed.content, "utf8")
+        }
+      });
+    }
+  }
+
+  let updated;
+  try {
+    updated = await prisma.globalAttractor.update({
+      where: { id: current.id },
+      data: {
+        ...(input.data.name !== undefined ? { name: input.data.name } : {}),
+        ...(input.data.repoPath !== undefined ? { repoPath: toNullableText(input.data.repoPath ?? undefined) } : {}),
+        ...(input.data.defaultRunType !== undefined ? { defaultRunType: input.data.defaultRunType } : {}),
+        ...(input.data.description !== undefined ? { description: toNullableText(input.data.description ?? undefined) } : {}),
+        ...(input.data.active !== undefined ? { active: input.data.active } : {}),
+        ...(input.data.content !== undefined
+          ? {
+              contentPath: nextContentPath,
+              contentVersion: nextContentVersion
+            }
+          : {})
+      }
+    });
+  } catch (error) {
+    return sendError(res, 409, error instanceof Error ? error.message : String(error));
+  }
+
+  await propagateGlobalAttractorToAllProjects(updated);
+
+  const payload =
+    parsedValidation && parsedContent
+      ? { content: parsedContent, validation: parsedValidation }
+      : await buildAttractorContentPayload(updated.contentPath);
+  res.json({
+    attractor: updated,
+    content: payload.content,
+    validation: payload.validation
+  });
+});
+
 app.post("/api/projects/:projectId/attractors", async (req, res) => {
   const input = createAttractorSchema.safeParse(req.body);
   if (!input.success) {
     return sendError(res, 400, input.error.message);
   }
 
-  const created = await prisma.attractorDef.create({
-    data: {
+  const parsed = parseAndLintAttractorContent(input.data.content);
+  if (!parsed.validation.valid) {
+    return res.status(400).json({
+      error: "attractor content failed validation",
+      validation: parsed.validation
+    });
+  }
+  const content = parsed.content;
+
+  const existing = await prisma.attractorDef.findUnique({
+    where: {
+      projectId_name_scope: {
+        projectId: req.params.projectId,
+        name: input.data.name,
+        scope: AttractorScope.PROJECT
+      }
+    }
+  });
+  const currentVersion = existing?.contentVersion ?? 0;
+  const latestVersion =
+    existing && currentVersion > 0
+      ? await prisma.attractorDefVersion.findUnique({
+          where: {
+            attractorDefId_version: {
+              attractorDefId: existing.id,
+              version: currentVersion
+            }
+          }
+        })
+      : null;
+  const contentSha256 = digestText(content);
+  const needsNewVersion =
+    !existing || !existing.contentPath || currentVersion <= 0 || latestVersion?.contentSha256 !== contentSha256;
+
+  let contentPath = existing?.contentPath ?? null;
+  let contentVersion = currentVersion;
+  if (needsNewVersion) {
+    contentVersion = Math.max(currentVersion, 0) + 1;
+    contentPath = attractorObjectPath({
+      scope: "project",
+      projectId: req.params.projectId,
+      name: input.data.name,
+      version: contentVersion
+    });
+    await putAttractorContent(contentPath, content);
+  }
+
+  const saved = await prisma.attractorDef.upsert({
+    where: {
+      projectId_name_scope: {
+        projectId: req.params.projectId,
+        name: input.data.name,
+        scope: AttractorScope.PROJECT
+      }
+    },
+    update: {
+      repoPath: toNullableText(input.data.repoPath),
+      contentPath,
+      contentVersion,
+      defaultRunType: input.data.defaultRunType,
+      description: input.data.description,
+      ...(input.data.active !== undefined ? { active: input.data.active } : {})
+    },
+    create: {
       projectId: req.params.projectId,
       scope: AttractorScope.PROJECT,
       name: input.data.name,
-      repoPath: input.data.repoPath,
+      repoPath: toNullableText(input.data.repoPath),
+      contentPath,
+      contentVersion,
       defaultRunType: input.data.defaultRunType,
       description: input.data.description,
       active: input.data.active ?? true
     }
   });
 
-  res.status(201).json(created);
+  if (needsNewVersion && contentPath) {
+    await prisma.attractorDefVersion.create({
+      data: {
+        attractorDefId: saved.id,
+        version: contentVersion,
+        contentPath,
+        contentSha256,
+        sizeBytes: Buffer.byteLength(content, "utf8")
+      }
+    });
+  }
+
+  res.status(201).json(saved);
 });
 
 app.get("/api/projects/:projectId/attractors", async (req, res) => {
@@ -1033,9 +2243,256 @@ app.get("/api/projects/:projectId/attractors", async (req, res) => {
   res.json({ attractors });
 });
 
+app.get("/api/projects/:projectId/attractors/:attractorId", async (req, res) => {
+  const attractor = await prisma.attractorDef.findFirst({
+    where: {
+      id: req.params.attractorId,
+      projectId: req.params.projectId
+    }
+  });
+  if (!attractor) {
+    return sendError(res, 404, "attractor not found in project");
+  }
+
+  const payload = await buildAttractorContentPayload(attractor.contentPath);
+  res.json({
+    attractor,
+    content: payload.content,
+    validation: payload.validation
+  });
+});
+
+app.get("/api/projects/:projectId/attractors/:attractorId/versions", async (req, res) => {
+  const attractor = await prisma.attractorDef.findFirst({
+    where: {
+      id: req.params.attractorId,
+      projectId: req.params.projectId
+    },
+    select: {
+      id: true,
+      scope: true,
+      name: true
+    }
+  });
+  if (!attractor) {
+    return sendError(res, 404, "attractor not found in project");
+  }
+
+  if (attractor.scope === AttractorScope.GLOBAL) {
+    const global = await prisma.globalAttractor.findUnique({
+      where: { name: attractor.name },
+      select: { id: true }
+    });
+    if (!global) {
+      return sendError(res, 404, "global attractor backing record not found");
+    }
+    const versions = await prisma.globalAttractorVersion.findMany({
+      where: { globalAttractorId: global.id },
+      orderBy: { version: "desc" }
+    });
+    return res.json({ versions });
+  }
+
+  const versions = await prisma.attractorDefVersion.findMany({
+    where: { attractorDefId: attractor.id },
+    orderBy: { version: "desc" }
+  });
+  res.json({ versions });
+});
+
+app.get("/api/projects/:projectId/attractors/:attractorId/versions/:version", async (req, res) => {
+  const version = Number.parseInt(req.params.version, 10);
+  if (!Number.isInteger(version) || version <= 0) {
+    return sendError(res, 400, "version must be a positive integer");
+  }
+
+  const attractor = await prisma.attractorDef.findFirst({
+    where: {
+      id: req.params.attractorId,
+      projectId: req.params.projectId
+    },
+    select: {
+      id: true,
+      scope: true,
+      name: true
+    }
+  });
+  if (!attractor) {
+    return sendError(res, 404, "attractor not found in project");
+  }
+
+  if (attractor.scope === AttractorScope.GLOBAL) {
+    const global = await prisma.globalAttractor.findUnique({
+      where: { name: attractor.name },
+      select: { id: true }
+    });
+    if (!global) {
+      return sendError(res, 404, "global attractor backing record not found");
+    }
+    const versionRow = await prisma.globalAttractorVersion.findUnique({
+      where: {
+        globalAttractorId_version: {
+          globalAttractorId: global.id,
+          version
+        }
+      }
+    });
+    if (!versionRow) {
+      return sendError(res, 404, "attractor version not found");
+    }
+    const payload = await buildAttractorContentPayload(versionRow.contentPath);
+    return res.json({
+      version: versionRow,
+      content: payload.content,
+      validation: payload.validation
+    });
+  }
+
+  const versionRow = await prisma.attractorDefVersion.findUnique({
+    where: {
+      attractorDefId_version: {
+        attractorDefId: attractor.id,
+        version
+      }
+    }
+  });
+  if (!versionRow) {
+    return sendError(res, 404, "attractor version not found");
+  }
+
+  const payload = await buildAttractorContentPayload(versionRow.contentPath);
+  res.json({
+    version: versionRow,
+    content: payload.content,
+    validation: payload.validation
+  });
+});
+
+app.patch("/api/projects/:projectId/attractors/:attractorId", async (req, res) => {
+  const input = patchAttractorSchema.safeParse(req.body);
+  if (!input.success) {
+    return sendError(res, 400, input.error.message);
+  }
+
+  const current = await prisma.attractorDef.findFirst({
+    where: {
+      id: req.params.attractorId,
+      projectId: req.params.projectId
+    }
+  });
+  if (!current) {
+    return sendError(res, 404, "attractor not found in project");
+  }
+  if (current.scope !== AttractorScope.PROJECT) {
+    return sendError(res, 409, "inherited global attractors are read-only in project scope");
+  }
+
+  if (
+    input.data.expectedContentVersion !== undefined &&
+    current.contentVersion !== input.data.expectedContentVersion
+  ) {
+    return sendError(
+      res,
+      409,
+      `content version mismatch: expected ${input.data.expectedContentVersion}, current ${current.contentVersion}`
+    );
+  }
+
+  let nextContentPath = current.contentPath;
+  let nextContentVersion = current.contentVersion;
+  let parsedContent: string | null = null;
+  let parsedValidation: AttractorValidationPayload | null = null;
+
+  if (input.data.content !== undefined) {
+    const parsed = parseAndLintAttractorContent(input.data.content);
+    parsedContent = parsed.content;
+    parsedValidation = parsed.validation;
+    if (!parsed.validation.valid) {
+      return res.status(400).json({
+        error: "attractor content failed validation",
+        validation: parsed.validation
+      });
+    }
+
+    const latestVersion =
+      current.contentVersion > 0
+        ? await prisma.attractorDefVersion.findUnique({
+            where: {
+              attractorDefId_version: {
+                attractorDefId: current.id,
+                version: current.contentVersion
+              }
+            }
+          })
+        : null;
+    const contentSha256 = digestText(parsed.content);
+    const needsNewVersion =
+      !current.contentPath ||
+      current.contentVersion <= 0 ||
+      !latestVersion ||
+      latestVersion.contentSha256 !== contentSha256;
+
+    if (needsNewVersion) {
+      nextContentVersion = Math.max(current.contentVersion, 0) + 1;
+      nextContentPath = attractorObjectPath({
+        scope: "project",
+        projectId: req.params.projectId,
+        name: input.data.name ?? current.name,
+        version: nextContentVersion
+      });
+      await putAttractorContent(nextContentPath, parsed.content);
+      await prisma.attractorDefVersion.create({
+        data: {
+          attractorDefId: current.id,
+          version: nextContentVersion,
+          contentPath: nextContentPath,
+          contentSha256,
+          sizeBytes: Buffer.byteLength(parsed.content, "utf8")
+        }
+      });
+    }
+  }
+
+  let updated;
+  try {
+    updated = await prisma.attractorDef.update({
+      where: { id: current.id },
+      data: {
+        ...(input.data.name !== undefined ? { name: input.data.name } : {}),
+        ...(input.data.repoPath !== undefined ? { repoPath: toNullableText(input.data.repoPath ?? undefined) } : {}),
+        ...(input.data.defaultRunType !== undefined ? { defaultRunType: input.data.defaultRunType } : {}),
+        ...(input.data.description !== undefined ? { description: toNullableText(input.data.description ?? undefined) } : {}),
+        ...(input.data.active !== undefined ? { active: input.data.active } : {}),
+        ...(input.data.content !== undefined
+          ? {
+              contentPath: nextContentPath,
+              contentVersion: nextContentVersion
+            }
+          : {})
+      }
+    });
+  } catch (error) {
+    return sendError(res, 409, error instanceof Error ? error.message : String(error));
+  }
+
+  const payload =
+    parsedValidation && parsedContent
+      ? { content: parsedContent, validation: parsedValidation }
+      : await buildAttractorContentPayload(updated.contentPath);
+  res.json({
+    attractor: updated,
+    content: payload.content,
+    validation: payload.validation
+  });
+});
+
 app.get("/api/projects/:projectId/runs", async (req, res) => {
   const runs = await prisma.run.findMany({
     where: { projectId: req.params.projectId },
+    include: {
+      githubIssue: true,
+      githubPullRequest: true
+    },
     orderBy: { createdAt: "desc" },
     take: 100
   });
@@ -1046,7 +2503,7 @@ const createRunSchema = z.object({
   projectId: z.string().min(1),
   attractorDefId: z.string().min(1),
   environmentId: z.string().min(1).optional(),
-  runType: z.enum(["planning", "implementation"]),
+  runType: z.enum(["planning", "implementation", "task"]),
   sourceBranch: z.string().min(1),
   targetBranch: z.string().min(1),
   specBundleId: z.string().optional(),
@@ -1094,8 +2551,25 @@ app.post("/api/runs", async (req, res) => {
     return sendError(res, 409, "attractor definition is inactive");
   }
 
+  let attractorSnapshot;
+  try {
+    attractorSnapshot = await resolveAttractorSnapshotForRun({
+      id: attractorDef.id,
+      name: attractorDef.name,
+      scope: attractorDef.scope,
+      contentPath: attractorDef.contentPath,
+      contentVersion: attractorDef.contentVersion
+    });
+  } catch (error) {
+    return sendError(res, 409, error instanceof Error ? error.message : String(error));
+  }
+
   if (input.data.runType === "planning" && input.data.specBundleId) {
     return sendError(res, 400, "planning runs must not set specBundleId");
+  }
+
+  if (input.data.runType === "task" && input.data.specBundleId) {
+    return sendError(res, 400, "task runs must not set specBundleId");
   }
 
   if (input.data.runType === "implementation" && !input.data.specBundleId) {
@@ -1147,6 +2621,9 @@ app.post("/api/runs", async (req, res) => {
     data: {
       projectId: project.id,
       attractorDefId: attractorDef.id,
+      attractorContentPath: attractorSnapshot.contentPath,
+      attractorContentVersion: attractorSnapshot.contentVersion,
+      attractorContentSha256: attractorSnapshot.contentSha256,
       environmentId: resolvedEnvironment.id,
       environmentSnapshot: resolvedEnvironment.snapshot as never,
       runType: input.data.runType,
@@ -1162,6 +2639,7 @@ app.post("/api/runs", async (req, res) => {
     runType: run.runType,
     projectId: run.projectId,
     targetBranch: run.targetBranch,
+    attractorSnapshot,
     modelConfig: input.data.modelConfig,
     environment: resolvedEnvironment.snapshot,
     runnerImage: resolvedEnvironment.snapshot.runnerImage
@@ -1170,6 +2648,175 @@ app.post("/api/runs", async (req, res) => {
   await redis.lpush(runQueueKey(), run.id);
 
   res.status(201).json({ runId: run.id, status: run.status });
+});
+
+const createIssueRunSchema = z.object({
+  attractorDefId: z.string().min(1),
+  environmentId: z.string().min(1).optional(),
+  runType: z.enum(["planning", "implementation", "task"]).default("implementation"),
+  sourceBranch: z.string().min(1).optional(),
+  targetBranch: z.string().min(1).optional(),
+  specBundleId: z.string().optional(),
+  modelConfig: z.object({
+    provider: z.string().min(1),
+    modelId: z.string().min(1),
+    reasoningLevel: z.enum(["minimal", "low", "medium", "high", "xhigh"]).optional(),
+    temperature: z.number().optional(),
+    maxTokens: z.number().int().positive().optional()
+  }),
+  force: z.boolean().optional()
+});
+
+app.post("/api/projects/:projectId/github/issues/:issueNumber/runs", async (req, res) => {
+  const issueNumber = Number.parseInt(req.params.issueNumber, 10);
+  if (!Number.isInteger(issueNumber) || issueNumber <= 0) {
+    return sendError(res, 400, "issueNumber must be a positive integer");
+  }
+
+  const input = createIssueRunSchema.safeParse(req.body);
+  if (!input.success) {
+    return sendError(res, 400, input.error.message);
+  }
+
+  try {
+    normalizeRunModelConfig(input.data.modelConfig);
+  } catch (error) {
+    return sendError(res, 400, error instanceof Error ? error.message : String(error));
+  }
+
+  const [project, issue] = await Promise.all([
+    prisma.project.findUnique({ where: { id: req.params.projectId } }),
+    prisma.gitHubIssue.findUnique({
+      where: {
+        projectId_issueNumber: {
+          projectId: req.params.projectId,
+          issueNumber
+        }
+      }
+    })
+  ]);
+
+  if (!project) {
+    return sendError(res, 404, "project not found");
+  }
+  if (!issue) {
+    return sendError(res, 404, "issue not found");
+  }
+  if (issue.state !== "open") {
+    return sendError(res, 409, "issue must be open to launch a run");
+  }
+
+  const providerSecretExists = await hasEffectiveProviderSecret(project.id, input.data.modelConfig.provider);
+  if (!providerSecretExists) {
+    return sendError(
+      res,
+      409,
+      `Missing provider secret for ${input.data.modelConfig.provider}. Configure it in Project Secret or Global Secret UI first.`
+    );
+  }
+
+  const attractorDef = await prisma.attractorDef.findUnique({
+    where: { id: input.data.attractorDefId }
+  });
+  if (!attractorDef || attractorDef.projectId !== project.id) {
+    return sendError(res, 404, "attractor definition not found in project");
+  }
+  if (!attractorDef.active) {
+    return sendError(res, 409, "attractor definition is inactive");
+  }
+
+  let attractorSnapshot;
+  try {
+    attractorSnapshot = await resolveAttractorSnapshotForRun({
+      id: attractorDef.id,
+      name: attractorDef.name,
+      scope: attractorDef.scope,
+      contentPath: attractorDef.contentPath,
+      contentVersion: attractorDef.contentVersion
+    });
+  } catch (error) {
+    return sendError(res, 409, error instanceof Error ? error.message : String(error));
+  }
+
+  let resolvedSpecBundleId = input.data.specBundleId;
+  if (input.data.runType === "implementation" && !resolvedSpecBundleId) {
+    const latestPlanningRun = await prisma.run.findFirst({
+      where: {
+        projectId: project.id,
+        runType: RunType.planning,
+        status: RunStatus.SUCCEEDED,
+        specBundleId: { not: null }
+      },
+      orderBy: { finishedAt: "desc" }
+    });
+    if (!latestPlanningRun?.specBundleId) {
+      return sendError(res, 409, "no successful planning run with a spec bundle is available");
+    }
+    resolvedSpecBundleId = latestPlanningRun.specBundleId;
+  }
+
+  let resolvedEnvironment;
+  try {
+    resolvedEnvironment = await resolveRunEnvironment({
+      projectId: project.id,
+      explicitEnvironmentId: input.data.environmentId
+    });
+  } catch (error) {
+    return sendError(res, 409, error instanceof Error ? error.message : String(error));
+  }
+
+  const sourceBranch = input.data.sourceBranch ?? project.defaultBranch ?? "main";
+  const targetBranch = input.data.targetBranch ?? issueTargetBranch(issue.issueNumber, issue.title);
+
+  const run = await prisma.run.create({
+    data: {
+      projectId: project.id,
+      attractorDefId: attractorDef.id,
+      attractorContentPath: attractorSnapshot.contentPath,
+      attractorContentVersion: attractorSnapshot.contentVersion,
+      attractorContentSha256: attractorSnapshot.contentSha256,
+      githubIssueId: issue.id,
+      environmentId: resolvedEnvironment.id,
+      environmentSnapshot: resolvedEnvironment.snapshot as never,
+      runType: input.data.runType,
+      sourceBranch,
+      targetBranch,
+      status: RunStatus.QUEUED,
+      specBundleId: resolvedSpecBundleId
+    },
+    include: {
+      githubIssue: true
+    }
+  });
+
+  await appendRunEvent(run.id, "RunQueued", {
+    runId: run.id,
+    runType: run.runType,
+    projectId: run.projectId,
+    targetBranch: run.targetBranch,
+    attractorSnapshot,
+    modelConfig: input.data.modelConfig,
+    environment: resolvedEnvironment.snapshot,
+    runnerImage: resolvedEnvironment.snapshot.runnerImage,
+    githubIssue: run.githubIssue
+      ? {
+          id: run.githubIssue.id,
+          issueNumber: run.githubIssue.issueNumber,
+          title: run.githubIssue.title,
+          url: run.githubIssue.url
+        }
+      : null
+  });
+
+  await redis.lpush(runQueueKey(), run.id);
+
+  res.status(201).json({
+    runId: run.id,
+    status: run.status,
+    sourceBranch: run.sourceBranch,
+    targetBranch: run.targetBranch,
+    githubIssue: run.githubIssue
+  });
 });
 
 const selfIterateSchema = z.object({
@@ -1216,6 +2863,22 @@ app.post("/api/projects/:projectId/self-iterate", async (req, res) => {
   const attractorDef = await prisma.attractorDef.findUnique({ where: { id: input.data.attractorDefId } });
   if (!attractorDef || attractorDef.projectId !== project.id) {
     return sendError(res, 404, "attractor definition not found in project");
+  }
+  if (!attractorDef.active) {
+    return sendError(res, 409, "attractor definition is inactive");
+  }
+
+  let attractorSnapshot;
+  try {
+    attractorSnapshot = await resolveAttractorSnapshotForRun({
+      id: attractorDef.id,
+      name: attractorDef.name,
+      scope: attractorDef.scope,
+      contentPath: attractorDef.contentPath,
+      contentVersion: attractorDef.contentVersion
+    });
+  } catch (error) {
+    return sendError(res, 409, error instanceof Error ? error.message : String(error));
   }
 
   const latestPlanningRun = await prisma.run.findFirst({
@@ -1267,6 +2930,9 @@ app.post("/api/projects/:projectId/self-iterate", async (req, res) => {
     data: {
       projectId: project.id,
       attractorDefId: attractorDef.id,
+      attractorContentPath: attractorSnapshot.contentPath,
+      attractorContentVersion: attractorSnapshot.contentVersion,
+      attractorContentSha256: attractorSnapshot.contentSha256,
       environmentId: resolvedEnvironment.id,
       environmentSnapshot: resolvedEnvironment.snapshot as never,
       runType: RunType.implementation,
@@ -1282,6 +2948,7 @@ app.post("/api/projects/:projectId/self-iterate", async (req, res) => {
     runType: run.runType,
     projectId: run.projectId,
     targetBranch: run.targetBranch,
+    attractorSnapshot,
     modelConfig: input.data.modelConfig,
     environment: resolvedEnvironment.snapshot,
     runnerImage: resolvedEnvironment.snapshot.runnerImage,
@@ -1299,10 +2966,29 @@ app.post("/api/projects/:projectId/self-iterate", async (req, res) => {
   });
 });
 
+const runReviewChecklistSchema = z.object({
+  summaryReviewed: z.boolean(),
+  criticalCodeReviewed: z.boolean(),
+  artifactsReviewed: z.boolean(),
+  functionalValidationReviewed: z.boolean()
+});
+
+const upsertRunReviewSchema = z.object({
+  reviewer: z.string().min(2).max(120),
+  decision: z.enum(["APPROVE", "REQUEST_CHANGES", "REJECT", "EXCEPTION"]),
+  checklist: runReviewChecklistSchema,
+  summary: z.string().max(20000).optional(),
+  criticalFindings: z.string().max(20000).optional(),
+  artifactFindings: z.string().max(20000).optional(),
+  attestation: z.string().max(20000).optional()
+});
+
 app.get("/api/runs/:runId", async (req, res) => {
   const run = await prisma.run.findUnique({
     where: { id: req.params.runId },
     include: {
+      githubIssue: true,
+      githubPullRequest: true,
       environment: true,
       events: {
         orderBy: { ts: "asc" },
@@ -1314,6 +3000,60 @@ app.get("/api/runs/:runId", async (req, res) => {
     return sendError(res, 404, "run not found");
   }
   res.json(run);
+});
+
+app.get("/api/runs/:runId/questions", async (req, res) => {
+  const run = await prisma.run.findUnique({ where: { id: req.params.runId } });
+  if (!run) {
+    return sendError(res, 404, "run not found");
+  }
+
+  const questions = await prisma.runQuestion.findMany({
+    where: { runId: run.id },
+    orderBy: { createdAt: "asc" }
+  });
+
+  res.json({ questions });
+});
+
+const answerRunQuestionSchema = z.object({
+  answer: z.string().min(1)
+});
+
+app.post("/api/runs/:runId/questions/:questionId/answer", async (req, res) => {
+  const input = answerRunQuestionSchema.safeParse(req.body);
+  if (!input.success) {
+    return sendError(res, 400, input.error.message);
+  }
+
+  const run = await prisma.run.findUnique({ where: { id: req.params.runId } });
+  if (!run) {
+    return sendError(res, 404, "run not found");
+  }
+
+  const question = await prisma.runQuestion.findFirst({
+    where: {
+      id: req.params.questionId,
+      runId: run.id
+    }
+  });
+  if (!question) {
+    return sendError(res, 404, "question not found for run");
+  }
+  if (question.status !== RunQuestionStatus.PENDING) {
+    return sendError(res, 409, "question is not pending");
+  }
+
+  const updated = await prisma.runQuestion.update({
+    where: { id: question.id },
+    data: {
+      answer: { text: input.data.answer },
+      status: RunQuestionStatus.ANSWERED,
+      answeredAt: new Date()
+    }
+  });
+
+  res.json({ question: updated });
 });
 
 app.get("/api/runs/:runId/events", async (req, res) => {
@@ -1368,6 +3108,173 @@ app.get("/api/runs/:runId/artifacts", async (req, res) => {
 
   const specBundle = await prisma.specBundle.findFirst({ where: { runId: req.params.runId } });
   res.json({ artifacts, specBundle });
+});
+
+app.get("/api/runs/:runId/review", async (req, res) => {
+  const reviewPack = await buildRunReviewPack(req.params.runId);
+  if (!reviewPack) {
+    return sendError(res, 404, "run not found");
+  }
+
+  res.json({
+    frameworkVersion: RUN_REVIEW_FRAMEWORK_VERSION,
+    review: reviewPack.review
+      ? {
+          ...reviewPack.review,
+          checklist: normalizeStoredChecklist(reviewPack.review.checklistJson)
+        }
+      : null,
+    checklistTemplate: reviewPack.checklistTemplate,
+    pack: reviewPack.pack,
+    github: {
+      pullRequest: reviewPack.run.githubPullRequest
+    }
+  });
+});
+
+app.put("/api/runs/:runId/review", async (req, res) => {
+  const input = upsertRunReviewSchema.safeParse(req.body);
+  if (!input.success) {
+    return sendError(res, 400, input.error.message);
+  }
+
+  const run = await prisma.run.findUnique({
+    where: { id: req.params.runId },
+    include: {
+      project: true,
+      githubPullRequest: true
+    }
+  });
+  if (!run) {
+    return sendError(res, 404, "run not found");
+  }
+
+  const feedbackPresent = hasFeedbackText({
+    summary: input.data.summary,
+    criticalFindings: input.data.criticalFindings,
+    artifactFindings: input.data.artifactFindings
+  });
+  const effectiveDecisionValue = effectiveReviewDecision(
+    input.data.decision as ReviewDecision,
+    feedbackPresent
+  );
+  if (
+    effectiveDecisionValue === ReviewDecision.APPROVE &&
+    !Object.values(input.data.checklist).every((item) => item === true)
+  ) {
+    return sendError(res, 400, "All checklist items must be completed before approval.");
+  }
+  if (
+    effectiveDecisionValue !== ReviewDecision.APPROVE &&
+    !feedbackPresent &&
+    !toNullableText(input.data.attestation)
+  ) {
+    return sendError(res, 400, "Non-approval outcomes require reviewer notes.");
+  }
+
+  const pack = await buildRunReviewPack(run.id);
+  const reviewedHeadSha = pack?.run.githubPullRequest?.headSha ?? run.githubPullRequest?.headSha ?? null;
+
+  const persisted = await prisma.runReview.upsert({
+    where: { runId: run.id },
+    update: {
+      reviewer: input.data.reviewer,
+      decision: effectiveDecisionValue,
+      checklistJson: input.data.checklist as never,
+      summary: toNullableText(input.data.summary),
+      criticalFindings: toNullableText(input.data.criticalFindings),
+      artifactFindings: toNullableText(input.data.artifactFindings),
+      attestation: toNullableText(input.data.attestation),
+      reviewedHeadSha,
+      summarySnapshotJson: pack ? (pack.pack.summarySuggestion as never) : undefined,
+      criticalSectionsSnapshotJson: (pack?.pack.criticalSections ?? []) as never,
+      artifactFocusSnapshotJson: (pack?.pack.artifactFocus ?? []) as never,
+      reviewedAt: new Date()
+    },
+    create: {
+      runId: run.id,
+      reviewer: input.data.reviewer,
+      decision: effectiveDecisionValue,
+      checklistJson: input.data.checklist as never,
+      summary: toNullableText(input.data.summary),
+      criticalFindings: toNullableText(input.data.criticalFindings),
+      artifactFindings: toNullableText(input.data.artifactFindings),
+      attestation: toNullableText(input.data.attestation),
+      reviewedHeadSha,
+      summarySnapshotJson: pack ? (pack.pack.summarySuggestion as never) : undefined,
+      criticalSectionsSnapshotJson: (pack?.pack.criticalSections ?? []) as never,
+      artifactFocusSnapshotJson: (pack?.pack.artifactFocus ?? []) as never,
+      reviewedAt: new Date()
+    }
+  });
+
+  let writebackStatus = "NOT_LINKED";
+  if (run.githubPullRequestId && run.project.githubInstallationId && run.project.repoFullName) {
+    try {
+      const writeback = await postReviewWriteback(persisted.id);
+      await prisma.runReview.update({
+        where: { id: persisted.id },
+        data: {
+          githubCheckRunId: writeback.githubCheckRunId,
+          githubSummaryCommentId: writeback.githubSummaryCommentId,
+          githubWritebackStatus: "SUCCEEDED",
+          githubWritebackAt: new Date()
+        }
+      });
+      writebackStatus = "SUCCEEDED";
+    } catch (error) {
+      await prisma.runReview.update({
+        where: { id: persisted.id },
+        data: {
+          githubWritebackStatus: "FAILED",
+          githubWritebackAt: new Date()
+        }
+      });
+      writebackStatus = "FAILED";
+      const retryReviewId = persisted.id;
+      setTimeout(() => {
+        void (async () => {
+          try {
+            const retryResult = await postReviewWriteback(retryReviewId);
+            await prisma.runReview.update({
+              where: { id: retryReviewId },
+              data: {
+                githubCheckRunId: retryResult.githubCheckRunId,
+                githubSummaryCommentId: retryResult.githubSummaryCommentId,
+                githubWritebackStatus: "SUCCEEDED",
+                githubWritebackAt: new Date()
+              }
+            });
+          } catch {
+            // Keep FAILED status after one async retry.
+          }
+        })();
+      }, 5000);
+      process.stderr.write(
+        `review writeback failed for run ${run.id}: ${error instanceof Error ? error.message : String(error)}\n`
+      );
+    }
+  }
+
+  await appendRunEvent(run.id, "RunReviewUpdated", {
+    runId: run.id,
+    reviewer: persisted.reviewer,
+    requestedDecision: input.data.decision,
+    decision: persisted.decision,
+    feedbackPresent,
+    effectiveDecision: effectiveDecisionValue,
+    githubWritebackStatus: writebackStatus
+  });
+
+  const refreshed = await prisma.runReview.findUnique({ where: { id: persisted.id } });
+  res.json({
+    effectiveDecision: effectiveDecisionValue,
+    feedbackPresent,
+    review: {
+      ...(refreshed ?? persisted),
+      checklist: normalizeStoredChecklist((refreshed ?? persisted).checklistJson)
+    }
+  });
 });
 
 app.get("/api/runs/:runId/artifacts/:artifactId/content", async (req, res) => {
@@ -1483,6 +3390,359 @@ app.post("/api/runs/:runId/cancel", async (req, res) => {
   res.json({ runId: updated.id, status: updated.status });
 });
 
+app.post("/api/github/webhooks", express.raw({ type: "*/*" }), async (req, res) => {
+  if (!githubSyncConfig.enabled) {
+    return sendError(res, 503, "GitHub sync is disabled");
+  }
+
+  const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from(String(req.body ?? ""), "utf8");
+  const signature = req.header("x-hub-signature-256");
+  const valid = verifyGitHubWebhookSignature({
+    rawBody,
+    signatureHeader: signature,
+    secret: githubSyncConfig.webhookSecret
+  });
+  if (!valid) {
+    return sendError(res, 401, "invalid webhook signature");
+  }
+
+  let payload: Record<string, unknown>;
+  try {
+    payload = JSON.parse(rawBody.toString("utf8")) as Record<string, unknown>;
+  } catch {
+    return sendError(res, 400, "invalid webhook payload");
+  }
+
+  const eventName = req.header("x-github-event")?.trim() ?? "";
+  const installationId = String(
+    ((payload.installation as { id?: unknown } | undefined)?.id ?? "")
+  );
+  const repositoryFullName = String(
+    ((payload.repository as { full_name?: unknown } | undefined)?.full_name ?? "")
+  );
+  if (!installationId || !repositoryFullName) {
+    return res.status(202).json({ accepted: true, ignored: true, reason: "missing installation/repository" });
+  }
+
+  const project = await prisma.project.findFirst({
+    where: {
+      githubInstallationId: installationId,
+      repoFullName: repositoryFullName
+    }
+  });
+  if (!project) {
+    return res.status(202).json({ accepted: true, ignored: true, reason: "project not mapped" });
+  }
+
+  const action = String(payload.action ?? "");
+  if (eventName === "issues" && ["opened", "edited", "reopened", "closed"].includes(action)) {
+    const issue = payload.issue as {
+      number: number;
+      state: string;
+      title: string;
+      body?: string | null;
+      user?: { login?: string | null } | null;
+      labels?: Array<string | { name?: string | null } | null> | null;
+      assignees?: Array<{ login?: string | null } | null> | null;
+      html_url: string;
+      created_at: string;
+      closed_at?: string | null;
+      updated_at: string;
+    } | undefined;
+    if (issue) {
+      await upsertGitHubIssueForProject({
+        projectId: project.id,
+        issue
+      });
+    }
+  }
+
+  if (eventName === "pull_request" && ["opened", "edited", "reopened", "closed", "synchronize"].includes(action)) {
+    const pullRequest = payload.pull_request as {
+      number: number;
+      state: string;
+      title: string;
+      body?: string | null;
+      html_url: string;
+      head: { ref: string; sha: string };
+      base: { ref: string };
+      created_at: string;
+      closed_at?: string | null;
+      merged_at?: string | null;
+      updated_at: string;
+    } | undefined;
+    if (pullRequest) {
+      await upsertGitHubPullRequestForProject({
+        projectId: project.id,
+        pullRequest
+      });
+    }
+  }
+
+  await prisma.gitHubSyncState.upsert({
+    where: { projectId: project.id },
+    update: {
+      lastIssueSyncAt: new Date(),
+      lastPullSyncAt: new Date(),
+      issuesCursor: new Date().toISOString(),
+      pullsCursor: new Date().toISOString(),
+      lastError: null
+    },
+    create: {
+      projectId: project.id,
+      lastIssueSyncAt: new Date(),
+      lastPullSyncAt: new Date(),
+      issuesCursor: new Date().toISOString(),
+      pullsCursor: new Date().toISOString(),
+      lastError: null
+    }
+  });
+
+  res.json({ accepted: true, event: eventName, action, projectId: project.id });
+});
+
+app.post("/api/projects/:projectId/github/reconcile", async (req, res) => {
+  try {
+    const result = await reconcileProjectGitHub(req.params.projectId);
+    res.json({ projectId: req.params.projectId, ...result });
+  } catch (error) {
+    sendError(res, 400, error instanceof Error ? error.message : String(error));
+  }
+});
+
+app.get("/api/projects/:projectId/github/issues", async (req, res) => {
+  const stateFilter = String(req.query.state ?? "all").trim();
+  const q = String(req.query.q ?? "").trim().toLowerCase();
+  const take = Math.min(Math.max(Number.parseInt(String(req.query.limit ?? "100"), 10) || 100, 1), 200);
+  const issues = await prisma.gitHubIssue.findMany({
+    where: {
+      projectId: req.params.projectId,
+      ...(stateFilter !== "all" ? { state: stateFilter } : {})
+    },
+    orderBy: [{ updatedAt: "desc" }],
+    include: {
+      _count: {
+        select: {
+          runs: true,
+          pullRequests: true
+        }
+      }
+    },
+    take
+  });
+
+  const filtered = q
+    ? issues.filter((issue) => {
+        return (
+          issue.title.toLowerCase().includes(q) ||
+          (issue.body ?? "").toLowerCase().includes(q) ||
+          issue.issueNumber.toString().includes(q)
+        );
+      })
+    : issues;
+
+  res.json({
+    issues: filtered.map((issue) => ({
+      ...issue,
+      runCount: issue._count.runs,
+      pullRequestCount: issue._count.pullRequests
+    }))
+  });
+});
+
+app.get("/api/projects/:projectId/github/issues/:issueNumber", async (req, res) => {
+  const issueNumber = Number.parseInt(req.params.issueNumber, 10);
+  if (!Number.isInteger(issueNumber) || issueNumber <= 0) {
+    return sendError(res, 400, "issueNumber must be a positive integer");
+  }
+
+  const issue = await prisma.gitHubIssue.findUnique({
+    where: {
+      projectId_issueNumber: {
+        projectId: req.params.projectId,
+        issueNumber
+      }
+    }
+  });
+  if (!issue) {
+    return sendError(res, 404, "issue not found");
+  }
+
+  const [runs, pullRequests, attractors, project] = await Promise.all([
+    prisma.run.findMany({
+      where: { githubIssueId: issue.id },
+      include: {
+        review: true,
+        githubPullRequest: true
+      },
+      orderBy: { createdAt: "desc" },
+      take: 50
+    }),
+    prisma.gitHubPullRequest.findMany({
+      where: { linkedIssueId: issue.id },
+      orderBy: { updatedAt: "desc" },
+      take: 50
+    }),
+    prisma.attractorDef.findMany({
+      where: {
+        projectId: req.params.projectId,
+        active: true
+      },
+      orderBy: { createdAt: "desc" }
+    }),
+    prisma.project.findUnique({ where: { id: req.params.projectId } })
+  ]);
+
+  res.json({
+    issue,
+    runs,
+    pullRequests,
+    launchDefaults: {
+      sourceBranch: project?.defaultBranch ?? "main",
+      targetBranch: issueTargetBranch(issue.issueNumber, issue.title),
+      attractorOptions: attractors.map((attractor) => ({
+        id: attractor.id,
+        name: attractor.name,
+        defaultRunType: attractor.defaultRunType
+      }))
+    }
+  });
+});
+
+app.get("/api/projects/:projectId/github/pulls", async (req, res) => {
+  const stateFilter = String(req.query.state ?? "all").trim();
+  const take = Math.min(Math.max(Number.parseInt(String(req.query.limit ?? "100"), 10) || 100, 1), 200);
+  const pulls = await prisma.gitHubPullRequest.findMany({
+    where: {
+      projectId: req.params.projectId,
+      ...(stateFilter !== "all" ? { state: stateFilter } : {})
+    },
+    include: {
+      linkedIssue: true
+    },
+    orderBy: [{ openedAt: "desc" }],
+    take
+  });
+
+  const pullIds = pulls.map((pull) => pull.id);
+  const linkedRuns = pullIds.length
+    ? await prisma.run.findMany({
+        where: {
+          githubPullRequestId: { in: pullIds }
+        },
+        include: {
+          review: true,
+          _count: {
+            select: { artifacts: true }
+          }
+        },
+        orderBy: { createdAt: "desc" }
+      })
+    : [];
+  const runByPull = new Map<string, (typeof linkedRuns)[number]>();
+  for (const run of linkedRuns) {
+    if (run.githubPullRequestId && !runByPull.has(run.githubPullRequestId)) {
+      runByPull.set(run.githubPullRequestId, run);
+    }
+  }
+
+  const now = Date.now();
+  const rows = pulls.map((pull) => {
+    const linkedRun = runByPull.get(pull.id) ?? null;
+    const dueAt = new Date(pull.openedAt.getTime() + 24 * 60 * 60 * 1000);
+    const minutesRemaining = Math.ceil((dueAt.getTime() - now) / 60000);
+    const reviewStatus = linkedRun?.review
+      ? "Completed"
+      : minutesRemaining < 0
+        ? "Overdue"
+        : "Pending";
+    const criticalCount = Array.isArray(linkedRun?.review?.criticalSectionsSnapshotJson)
+      ? (linkedRun?.review?.criticalSectionsSnapshotJson as unknown[]).length
+      : 0;
+    const risk = inferPrRiskLevel({
+      title: pull.title,
+      body: pull.body,
+      headRefName: pull.headRefName
+    });
+    return {
+      pullRequest: pull,
+      linkedRunId: linkedRun?.id ?? null,
+      reviewDecision: linkedRun?.review?.decision ?? null,
+      reviewStatus,
+      risk,
+      dueAt: dueAt.toISOString(),
+      minutesRemaining,
+      criticalCount,
+      artifactCount: linkedRun?._count.artifacts ?? 0,
+      openPackPath: linkedRun ? `/runs/${linkedRun.id}?tab=review` : null
+    };
+  });
+
+  res.json({ pulls: rows });
+});
+
+app.get("/api/projects/:projectId/github/pulls/:prNumber", async (req, res) => {
+  const prNumber = Number.parseInt(req.params.prNumber, 10);
+  if (!Number.isInteger(prNumber) || prNumber <= 0) {
+    return sendError(res, 400, "prNumber must be a positive integer");
+  }
+
+  const pullRequest = await prisma.gitHubPullRequest.findUnique({
+    where: {
+      projectId_prNumber: {
+        projectId: req.params.projectId,
+        prNumber
+      }
+    },
+    include: {
+      linkedIssue: true
+    }
+  });
+  if (!pullRequest) {
+    return sendError(res, 404, "pull request not found");
+  }
+
+  const linkedRun = await prisma.run.findFirst({
+    where: { githubPullRequestId: pullRequest.id },
+    include: {
+      review: true,
+      _count: {
+        select: { artifacts: true }
+      }
+    },
+    orderBy: { createdAt: "desc" }
+  });
+
+  const dueAt = new Date(pullRequest.openedAt.getTime() + 24 * 60 * 60 * 1000);
+  const minutesRemaining = Math.ceil((dueAt.getTime() - Date.now()) / 60000);
+  const reviewStatus = linkedRun?.review
+    ? "Completed"
+    : minutesRemaining < 0
+      ? "Overdue"
+      : "Pending";
+
+  res.json({
+    pull: {
+      pullRequest,
+      linkedRunId: linkedRun?.id ?? null,
+      reviewDecision: linkedRun?.review?.decision ?? null,
+      reviewStatus,
+      risk: inferPrRiskLevel({
+        title: pullRequest.title,
+        body: pullRequest.body,
+        headRefName: pullRequest.headRefName
+      }),
+      dueAt: dueAt.toISOString(),
+      minutesRemaining,
+      criticalCount: Array.isArray(linkedRun?.review?.criticalSectionsSnapshotJson)
+        ? (linkedRun?.review?.criticalSectionsSnapshotJson as unknown[]).length
+        : 0,
+      artifactCount: linkedRun?._count.artifacts ?? 0,
+      openPackPath: linkedRun ? `/runs/${linkedRun.id}?tab=review` : null
+    }
+  });
+});
+
 app.get("/api/github/app/start", (req, res) => {
   const slug = process.env.GITHUB_APP_SLUG;
   if (!slug) {
@@ -1541,6 +3801,47 @@ app.use((err: unknown, _req: express.Request, res: express.Response, _next: expr
   res.status(500).json({ error: message });
 });
 
+let reconcileLoopActive = false;
+function startGitHubReconcileLoop() {
+  if (!githubSyncConfig.enabled) {
+    process.stdout.write("github sync scheduler disabled\n");
+    return;
+  }
+  const intervalMs = githubSyncConfig.reconcileIntervalMinutes * 60 * 1000;
+  setInterval(() => {
+    if (reconcileLoopActive) {
+      return;
+    }
+    reconcileLoopActive = true;
+    void (async () => {
+      try {
+        const projects = await prisma.project.findMany({
+          where: {
+            githubInstallationId: { not: null },
+            repoFullName: { not: null }
+          },
+          select: { id: true }
+        });
+        for (const project of projects) {
+          try {
+            const result = await reconcileProjectGitHub(project.id);
+            process.stdout.write(
+              `github reconcile project=${project.id} issues=${result.issuesSynced} pulls=${result.pullRequestsSynced}\n`
+            );
+          } catch (error) {
+            process.stderr.write(
+              `github reconcile failed project=${project.id}: ${error instanceof Error ? error.message : String(error)}\n`
+            );
+          }
+        }
+      } finally {
+        reconcileLoopActive = false;
+      }
+    })();
+  }, intervalMs);
+}
+
 app.listen(PORT, HOST, () => {
   process.stdout.write(`factory-api listening on http://${HOST}:${PORT}\n`);
+  startGitHubReconcileLoop();
 });

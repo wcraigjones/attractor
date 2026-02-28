@@ -1,5 +1,6 @@
 {
   "compilerOptions": {
+    "baseUrl": ".",
     "target": "ES2022",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "module": "ESNext",
@@ -8,7 +9,12 @@
     "strict": true,
     "skipLibCheck": true,
     "noEmit": true,
-    "types": ["vite/client"]
+    "types": ["vite/client"],
+    "paths": {
+      "@attractor/dot-engine": [
+        "../../packages/dot-engine/src/index.ts"
+      ]
+    }
   },
   "include": ["src/client/**/*.ts", "src/client/**/*.tsx", "vite.config.ts"]
 }

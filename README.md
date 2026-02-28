@@ -29,6 +29,7 @@ codeagent> Implement Attractor as described by https://github.com/strongdm/attra
 - `deploy/helm/factory-system`: OrbStack-focused Helm chart
 - `prisma/`: Postgres schema + initial migration
 - `factory/self-bootstrap.dot`: baseline self-factory pipeline definition
+- `factory/task-review-framework.dot`: review loop template (summary/critical/artifacts/checklist/decision)
 - `scripts/`: local image build, OrbStack deploy, and self-bootstrap helpers
 
 ## Local Setup
@@ -38,6 +39,22 @@ npm install
 npm run prisma:generate
 npm run check-types
 npm run test
+```
+
+## Conformance Suite
+
+This repo includes the upstream `fkyeah` conformance suite under `conformance/`.
+
+Run deterministic categories (`01`-`06`) with live-model categories (`07`/`08`) skipped:
+
+```bash
+npm run test:conformance
+```
+
+Run the full suite (including live-model tests) when API keys are configured:
+
+```bash
+ATTRACTOR_BIN=~/bin/attractor npm run test:conformance:all
 ```
 
 For iterative work (service-by-service):
@@ -77,10 +94,16 @@ Web route map:
 - `/`
 - `/projects`
 - `/attractors/global`
+- `/attractors/global/:attractorId`
 - `/secrets/global`
 - `/projects/:projectId`
 - `/projects/:projectId/secrets`
 - `/projects/:projectId/attractors`
+- `/projects/:projectId/attractors/:attractorId`
+- `/projects/:projectId/github/issues`
+- `/projects/:projectId/github/issues/:issueNumber`
+- `/projects/:projectId/github/pulls`
+- `/projects/:projectId/github/pulls/:prNumber`
 - `/projects/:projectId/runs`
 - `/runs/:runId`
 - `/runs/:runId/artifacts/:artifactId`
@@ -157,15 +180,30 @@ Implemented endpoints:
 - `GET /api/secrets/global`
 - `POST /api/attractors/global`
 - `GET /api/attractors/global`
+- `GET /api/attractors/global/{attractorId}`
+- `PATCH /api/attractors/global/{attractorId}`
+- `GET /api/attractors/global/{attractorId}/versions`
+- `GET /api/attractors/global/{attractorId}/versions/{version}`
 - `POST /api/projects`
 - `GET /api/projects`
 - `POST /api/projects/{projectId}/environment`
 - `POST /api/bootstrap/self`
 - `POST /api/projects/{projectId}/repo/connect/github`
+- `POST /api/github/webhooks`
+- `POST /api/projects/{projectId}/github/reconcile`
+- `GET /api/projects/{projectId}/github/issues`
+- `GET /api/projects/{projectId}/github/issues/{issueNumber}`
+- `POST /api/projects/{projectId}/github/issues/{issueNumber}/runs`
+- `GET /api/projects/{projectId}/github/pulls`
+- `GET /api/projects/{projectId}/github/pulls/{prNumber}`
 - `POST /api/projects/{projectId}/secrets`
 - `GET /api/projects/{projectId}/secrets`
 - `POST /api/projects/{projectId}/attractors`
 - `GET /api/projects/{projectId}/attractors`
+- `GET /api/projects/{projectId}/attractors/{attractorId}`
+- `PATCH /api/projects/{projectId}/attractors/{attractorId}`
+- `GET /api/projects/{projectId}/attractors/{attractorId}/versions`
+- `GET /api/projects/{projectId}/attractors/{attractorId}/versions/{version}`
 - `GET /api/projects/{projectId}/runs`
 - `POST /api/runs`
 - `POST /api/projects/{projectId}/self-iterate`
@@ -174,6 +212,8 @@ Implemented endpoints:
 - `GET /api/runs/{runId}/artifacts`
 - `GET /api/runs/{runId}/artifacts/{artifactId}/content`
 - `GET /api/runs/{runId}/artifacts/{artifactId}/download`
+- `GET /api/runs/{runId}/review`
+- `PUT /api/runs/{runId}/review`
 - `POST /api/runs/{runId}/cancel`
 
 Environment images should be digest-pinned for immutable harness execution (for example `ghcr.io/org/runner@sha256:...`).
