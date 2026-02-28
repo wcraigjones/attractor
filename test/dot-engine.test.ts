@@ -98,6 +98,9 @@ describe("DOT engine", () => {
     validateDotGraph(graph);
 
     expect(graph.graphAttrs.final_artifact_key).toBe("security-review-report.md");
+    expect(graph.graphAttrs.reviewer_artifact_nodes).toBe(
+      "reviewer_gpt53,reviewer_gemini,reviewer_sonnet,reviewer_opus,reviewer_glm,reviewer_kimi"
+    );
     expect(graph.graphAttrs.final_output_node).toBe("synthesis");
 
     const reviewerNodes = graph.nodeOrder.filter((nodeId) =>

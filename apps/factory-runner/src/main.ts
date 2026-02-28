@@ -605,6 +605,48 @@ async function checkoutRepository(runId: string, repoFullName: string, sourceBra
   return workDir;
 }
 
+async function loadAttractorContent(args: {
+  workDir: string;
+  attractor: {
+    name: string;
+    repoPath: string | null;
+    contentPath: string | null;
+    contentVersion: number;
+  };
+}): Promise<{ content: string; source: "storage" | "repo"; path: string }> {
+  if (args.attractor.contentPath) {
+    try {
+      const content = await getObjectString(args.attractor.contentPath);
+      return {
+        content,
+        source: "storage",
+        path: args.attractor.contentPath
+      };
+    } catch (error) {
+      if (!args.attractor.repoPath) {
+        throw new Error(
+          `Failed to load attractor ${args.attractor.name} content from storage path ${args.attractor.contentPath}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+    }
+  }
+
+  if (!args.attractor.repoPath) {
+    throw new Error(
+      `Attractor ${args.attractor.name} has no storage content and no legacy repoPath configured`
+    );
+  }
+
+  const absolutePath = join(args.workDir, args.attractor.repoPath);
+  return {
+    content: readFileSync(absolutePath, "utf8"),
+    source: "repo",
+    path: args.attractor.repoPath
+  };
+}
+
 async function createSpecBundle(runId: string, projectId: string, sourceBranch: string, repo: string, planText: string): Promise<{ specBundleId: string; manifestPath: string }> {
   const schemaVersion = "v1";
   const prefix = `spec-bundles/${projectId}/${runId}`;
@@ -872,6 +914,143 @@ function selectFinalOutputNodeId(graph: ReturnType<typeof parseDotGraph>, state:
   return null;
 }
 
+function parseArtifactNodeList(rawValue: string | undefined): string[] {
+  if (!rawValue) {
+    return [];
+  }
+
+  const trimmed = rawValue.trim();
+  if (trimmed.length === 0) {
+    return [];
+  }
+
+  const parsedValues: string[] = [];
+  if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      if (Array.isArray(parsed)) {
+        for (const item of parsed) {
+          if (typeof item === "string") {
+            parsedValues.push(item);
+          }
+        }
+      }
+    } catch {
+      // Ignore and fall back to delimiter-based parsing.
+    }
+  }
+
+  if (parsedValues.length === 0) {
+    parsedValues.push(...trimmed.split(/[\s,;]+/g));
+  }
+
+  const uniqueNodeIds: string[] = [];
+  const seen = new Set<string>();
+  for (const value of parsedValues) {
+    const nodeId = value.trim();
+    if (nodeId.length === 0 || seen.has(nodeId)) {
+      continue;
+    }
+    seen.add(nodeId);
+    uniqueNodeIds.push(nodeId);
+  }
+  return uniqueNodeIds;
+}
+
+function normalizeArtifactKey(rawKey: string, fallback: string): string {
+  const trimmed = rawKey.trim();
+  if (trimmed.length === 0) {
+    return fallback;
+  }
+
+  const normalized = trimmed
+    .replace(/^\/+/, "")
+    .split("/")
+    .filter((segment) => segment.length > 0 && segment !== "." && segment !== "..")
+    .join("/");
+
+  return normalized.length > 0 ? normalized : fallback;
+}
+
+function reviewerArtifactKey(nodeId: string): string {
+  const safeStem = nodeId.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  return `reviewers/${safeStem || "reviewer"}.md`;
+}
+
+function withUniqueArtifactKey(desiredKey: string, usedKeys: Set<string>): string {
+  if (!usedKeys.has(desiredKey)) {
+    usedKeys.add(desiredKey);
+    return desiredKey;
+  }
+
+  const extensionIndex = desiredKey.lastIndexOf(".");
+  const hasExtension = extensionIndex > 0 && extensionIndex < desiredKey.length - 1;
+  const base = hasExtension ? desiredKey.slice(0, extensionIndex) : desiredKey;
+  const extension = hasExtension ? desiredKey.slice(extensionIndex) : "";
+  let suffix = 2;
+  let candidate = `${base}-${suffix}${extension}`;
+  while (usedKeys.has(candidate)) {
+    suffix += 1;
+    candidate = `${base}-${suffix}${extension}`;
+  }
+  usedKeys.add(candidate);
+  return candidate;
+}
+
+function resolveParallelBranchName(graph: ReturnType<typeof parseDotGraph>, edgeIndex: number): string | null {
+  const edge = graph.edges[edgeIndex];
+  if (!edge) {
+    return null;
+  }
+
+  const labeled = edge.label.trim();
+  if (labeled.length > 0) {
+    return labeled;
+  }
+
+  const outgoingEdges = graph.edges.filter((candidate) => candidate.from === edge.from);
+  const branchIndex = outgoingEdges.findIndex((candidate) => candidate === edge);
+  if (branchIndex < 0) {
+    return null;
+  }
+  return `branch-${branchIndex + 1}`;
+}
+
+function resolveTaskNodeOutput(
+  graph: ReturnType<typeof parseDotGraph>,
+  state: EngineState,
+  nodeId: string
+): string {
+  const directOutput = state.nodeOutputs[nodeId];
+  if (directOutput && directOutput.trim().length > 0) {
+    return directOutput;
+  }
+
+  for (let edgeIndex = 0; edgeIndex < graph.edges.length; edgeIndex += 1) {
+    const edge = graph.edges[edgeIndex];
+    if (!edge || edge.to !== nodeId) {
+      continue;
+    }
+
+    const fromNode = graph.nodes[edge.from];
+    if (!fromNode || fromNode.type !== "parallel") {
+      continue;
+    }
+
+    const branchName = resolveParallelBranchName(graph, edgeIndex);
+    if (!branchName) {
+      continue;
+    }
+
+    const branchOutput = state.parallelOutputs[fromNode.id]?.[branchName];
+    if (branchOutput && branchOutput.trim().length > 0) {
+      return branchOutput;
+    }
+  }
+
+  return "";
+}
+
 async function processTaskRun(args: {
   runId: string;
   projectId: string;
@@ -1025,9 +1204,16 @@ async function processTaskRun(args: {
 
   const finalNodeId = selectFinalOutputNodeId(graph, execution.state);
   const outputText = finalNodeId ? execution.state.nodeOutputs[finalNodeId] ?? "" : "";
-  const artifactKey =
-    (graph.graphAttrs.final_artifact_key ?? graph.graphAttrs.finalArtifactKey ?? "task-report.md").trim() ||
-    "task-report.md";
+  const finalArtifactKey = normalizeArtifactKey(
+    graph.graphAttrs.final_artifact_key ?? graph.graphAttrs.finalArtifactKey ?? "task-report.md",
+    "task-report.md"
+  );
+  const reviewerArtifactNodes = parseArtifactNodeList(
+    graph.graphAttrs.reviewer_artifact_nodes ??
+      graph.graphAttrs.reviewerArtifactNodes ??
+      graph.graphAttrs.additional_artifact_nodes ??
+      graph.graphAttrs.additionalArtifactNodes
+  );
 
   const report = renderTaskReport({
     output: outputText,
@@ -1039,34 +1225,94 @@ async function processTaskRun(args: {
     modelResolutions: [...modelResolutions.values()]
   });
 
-  const artifactPath = `runs/${args.projectId}/${args.runId}/${artifactKey}`;
+  type PendingArtifact = {
+    key: string;
+    content: string;
+    nodeId: string | null;
+  };
+
+  const pendingArtifacts: PendingArtifact[] = [];
+  for (const nodeId of reviewerArtifactNodes) {
+    const nodeOutput = resolveTaskNodeOutput(graph, execution.state, nodeId);
+    const outputBody =
+      nodeOutput && nodeOutput.trim().length > 0
+        ? nodeOutput.trim()
+        : [
+            "# Reviewer Output Unavailable",
+            "",
+            `Node: \`${nodeId}\``,
+            `Status: \`${execution.state.nodeOutcomes[nodeId]?.status ?? "UNKNOWN"}\``,
+            "",
+            execution.state.nodeOutcomes[nodeId]?.failureReason ?? "The reviewer node did not produce markdown output."
+          ].join("\n");
+    pendingArtifacts.push({
+      key: reviewerArtifactKey(nodeId),
+      content: `${outputBody}\n`,
+      nodeId
+    });
+  }
+
+  pendingArtifacts.push({
+    key: finalArtifactKey,
+    content: report,
+    nodeId: finalNodeId
+  });
+
+  const usedKeys = new Set<string>();
+  const artifactsToWrite = pendingArtifacts.map((artifact) => {
+    const normalizedKey = normalizeArtifactKey(artifact.key, "task-report.md");
+    const key = withUniqueArtifactKey(normalizedKey, usedKeys);
+    return {
+      ...artifact,
+      key,
+      path: `runs/${args.projectId}/${args.runId}/${key}`
+    };
+  });
+
+  const finalArtifact = artifactsToWrite[artifactsToWrite.length - 1];
+  if (!finalArtifact) {
+    throw new Error("Task run produced no artifacts to write");
+  }
+
   await prisma.artifact.deleteMany({
     where: {
       runId: args.runId
     }
   });
-  await putObject(artifactPath, report, "text/markdown");
-  await prisma.artifact.create({
-    data: {
-      runId: args.runId,
-      key: artifactKey,
-      path: artifactPath,
-      contentType: "text/markdown",
-      sizeBytes: Buffer.byteLength(report, "utf8")
+
+  for (const artifact of artifactsToWrite) {
+    await putObject(artifact.path, artifact.content, "text/markdown");
+    await prisma.artifact.create({
+      data: {
+        runId: args.runId,
+        key: artifact.key,
+        path: artifact.path,
+        contentType: "text/markdown",
+        sizeBytes: Buffer.byteLength(artifact.content, "utf8")
+      }
+    });
+
+    if (artifact !== finalArtifact) {
+      await appendRunEvent(args.runId, "TaskNodeArtifactWritten", {
+        runId: args.runId,
+        nodeId: artifact.nodeId,
+        artifactKey: artifact.key,
+        artifactPath: artifact.path
+      });
     }
-  });
+  }
 
   await appendRunEvent(args.runId, "TaskArtifactWritten", {
     runId: args.runId,
-    artifactKey,
-    artifactPath,
+    artifactKey: finalArtifact.key,
+    artifactPath: finalArtifact.path,
     finalNodeId,
     exitNodeId: execution.exitNodeId
   });
 
   return {
-    artifactKey,
-    artifactPath,
+    artifactKey: finalArtifact.key,
+    artifactPath: finalArtifact.path,
     exitNodeId: execution.exitNodeId,
     finalNodeId
   };
@@ -1116,8 +1362,24 @@ async function processRun(spec: RunExecutionSpec): Promise<void> {
   const workDir = await checkoutRepository(run.id, run.project.repoFullName, run.sourceBranch);
 
   try {
-    const attractorFile = join(workDir, run.attractorDef.repoPath);
-    const attractorContent = readFileSync(attractorFile, "utf8");
+    const attractorResolved = await loadAttractorContent({
+      workDir,
+      attractor: {
+        name: run.attractorDef.name,
+        repoPath: run.attractorDef.repoPath,
+        contentPath: run.attractorDef.contentPath,
+        contentVersion: run.attractorDef.contentVersion
+      }
+    });
+    const attractorContent = attractorResolved.content;
+
+    await appendRunEvent(run.id, "AttractorContentResolved", {
+      runId: run.id,
+      attractorDefId: run.attractorDefId,
+      source: attractorResolved.source,
+      path: attractorResolved.path,
+      contentVersion: run.attractorDef.contentVersion
+    });
 
     if (run.runType === RunType.task) {
       const taskResult = await processTaskRun({
