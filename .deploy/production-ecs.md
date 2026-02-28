@@ -1,5 +1,16 @@
 # Production Deployment: AWS ECS
 
+## Status
+
+**Future phase (not current production path).**
+
+Current implemented deployment target is **AWS EKS**:
+
+- [AWS EKS Architecture](./aws-eks-architecture.md)
+- [AWS EKS Runbook](./aws-eks-runbook.md)
+- [AWS Ops and Scaling](./aws-ops-and-scaling.md)
+- [AWS Troubleshooting](./aws-troubleshooting.md)
+
 ## Scope
 
 This document describes a production ECS deployment model for Factory.
