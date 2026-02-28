@@ -18,6 +18,7 @@ import { ProjectsPage } from "./pages/projects-page";
 import { ProjectEnvironmentsPage } from "./pages/project-environments-page";
 import { ProjectRunsPage } from "./pages/project-runs-page";
 import { ProjectSecretsPage } from "./pages/project-secrets-page";
+import { ProjectSetupWizardPage } from "./pages/project-setup-wizard-page";
 import { RunDetailPage } from "./pages/run-detail-page";
 
 export function App() {
@@ -25,6 +26,7 @@ export function App() {
     <Routes>
       <Route path="/" element={<AppShell />}>
         <Route index element={<DashboardPage />} />
+        <Route path="setup" element={<ProjectSetupWizardPage />} />
         <Route path="projects" element={<ProjectsPage />} />
         <Route path="environments/global" element={<GlobalEnvironmentsPage />} />
         <Route path="attractors/global" element={<GlobalAttractorsPage />} />
@@ -34,6 +36,7 @@ export function App() {
         <Route path="projects/:projectId/environments" element={<ProjectEnvironmentsPage />} />
         <Route path="projects/:projectId/secrets" element={<ProjectSecretsPage />} />
         <Route path="projects/:projectId/attractors" element={<ProjectAttractorsPage />} />
+        <Route path="projects/:projectId/setup" element={<ProjectSetupWizardPage />} />
         <Route path="projects/:projectId/attractors/:attractorId" element={<ProjectAttractorStudioPage />} />
         <Route path="projects/:projectId/github/issues" element={<ProjectGitHubIssuesPage />} />
         <Route path="projects/:projectId/github/issues/:issueNumber" element={<ProjectGitHubIssueDetailPage />} />

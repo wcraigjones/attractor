@@ -41,6 +41,9 @@ describe("scope selector helpers", () => {
     expect(resolveSelectedScope({ pathname: "/projects", fallbackProjectId: GLOBAL_SCOPE_VALUE })).toBe(
       GLOBAL_SCOPE_VALUE
     );
+    expect(resolveSelectedScope({ pathname: "/setup", fallbackProjectId: GLOBAL_SCOPE_VALUE })).toBe(
+      GLOBAL_SCOPE_VALUE
+    );
   });
 
   it("builds options with Global as first row", () => {

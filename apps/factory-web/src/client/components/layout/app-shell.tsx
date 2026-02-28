@@ -218,6 +218,7 @@ export function AppShell() {
             <div className="mt-4 space-y-1 border-t border-border pt-4">
               {[
                 { to: `/projects/${selectedProjectId}`, label: "Overview" },
+                { to: `/projects/${selectedProjectId}/setup`, label: "Setup" },
                 { to: `/projects/${selectedProjectId}/environments`, label: "Environments" },
                 { to: `/projects/${selectedProjectId}/secrets`, label: "Secrets" },
                 { to: `/projects/${selectedProjectId}/attractors`, label: "Attractors" },

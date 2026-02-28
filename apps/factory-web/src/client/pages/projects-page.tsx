@@ -50,7 +50,15 @@ export function ProjectsPage() {
 
   return (
     <div>
-      <PageTitle title="Projects" description="Create project namespaces and connect repositories." />
+      <PageTitle
+        title="Projects"
+        description="Create project namespaces and connect repositories."
+        actions={
+          <Button asChild variant="outline">
+            <Link to="/setup">Setup Wizard</Link>
+          </Button>
+        }
+      />
 
       <div className="grid gap-4 lg:grid-cols-[2fr,1fr]">
         <Card>
