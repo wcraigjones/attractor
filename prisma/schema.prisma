@@ -82,6 +82,7 @@ model GlobalAttractor {
   contentPath    String?
   contentVersion Int      @default(0)
   defaultRunType RunType
+  modelConfig    Json?
   description    String?
   active         Boolean  @default(true)
   createdAt      DateTime @default(now())
@@ -112,6 +113,7 @@ model AttractorDef {
   contentPath    String?
   contentVersion Int      @default(0)
   defaultRunType RunType
+  modelConfig    Json?
   description    String?
   active         Boolean  @default(true)
   createdAt      DateTime @default(now())

@@ -27,6 +27,9 @@ export function GlobalAttractorsPage() {
   const [sourceLabel, setSourceLabel] = useState("");
   const [content, setContent] = useState(DEFAULT_DOT_TEMPLATE);
   const [defaultRunType, setDefaultRunType] = useState<"planning" | "implementation" | "task">("planning");
+  const [modelProvider, setModelProvider] = useState("anthropic");
+  const [modelId, setModelId] = useState("claude-sonnet-4-20250514");
+  const [reasoningLevel, setReasoningLevel] = useState<"minimal" | "low" | "medium" | "high" | "xhigh">("high");
   const [description, setDescription] = useState("");
   const [active, setActive] = useState(true);
 
@@ -42,6 +45,12 @@ export function GlobalAttractorsPage() {
         content,
         ...(sourceLabel.trim().length > 0 ? { repoPath: sourceLabel.trim() } : {}),
         defaultRunType,
+        modelConfig: {
+          provider: modelProvider.trim(),
+          modelId: modelId.trim(),
+          reasoningLevel,
+          temperature: 0.2
+        },
         description: description.trim().length > 0 ? description.trim() : undefined,
         active
       }),
@@ -76,6 +85,13 @@ export function GlobalAttractorsPage() {
         content: detail.content,
         ...(detail.attractor.repoPath ? { repoPath: detail.attractor.repoPath } : {}),
         defaultRunType: detail.attractor.defaultRunType,
+        modelConfig:
+          detail.attractor.modelConfig ?? {
+            provider: modelProvider.trim(),
+            modelId: modelId.trim(),
+            reasoningLevel,
+            temperature: 0.2
+          },
         ...(detail.attractor.description ? { description: detail.attractor.description } : {}),
         active: detail.attractor.active
       });
@@ -108,8 +124,8 @@ export function GlobalAttractorsPage() {
               className="space-y-3"
               onSubmit={(event) => {
                 event.preventDefault();
-                if (!name.trim() || !content.trim()) {
-                  toast.error("Global attractor name and DOT content are required");
+                if (!name.trim() || !content.trim() || !modelProvider.trim() || !modelId.trim()) {
+                  toast.error("Global attractor name, DOT content, provider, and model are required");
                   return;
                 }
                 mutation.mutate();
@@ -145,6 +161,32 @@ export function GlobalAttractorsPage() {
                     <SelectItem value="planning">planning</SelectItem>
                     <SelectItem value="implementation">implementation</SelectItem>
                     <SelectItem value="task">task</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1">
+                <Label>Model Provider</Label>
+                <Input value={modelProvider} onChange={(event) => setModelProvider(event.target.value)} />
+              </div>
+              <div className="space-y-1">
+                <Label>Model ID</Label>
+                <Input value={modelId} onChange={(event) => setModelId(event.target.value)} />
+              </div>
+              <div className="space-y-1">
+                <Label>Reasoning</Label>
+                <Select
+                  value={reasoningLevel}
+                  onValueChange={(value: "minimal" | "low" | "medium" | "high" | "xhigh") => setReasoningLevel(value)}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="minimal">minimal</SelectItem>
+                    <SelectItem value="low">low</SelectItem>
+                    <SelectItem value="medium">medium</SelectItem>
+                    <SelectItem value="high">high</SelectItem>
+                    <SelectItem value="xhigh">xhigh</SelectItem>
                   </SelectContent>
                 </Select>
               </div>

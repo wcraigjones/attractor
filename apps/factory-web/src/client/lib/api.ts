@@ -167,7 +167,12 @@ export async function getProjectGitHubIssue(
   launchDefaults: {
     sourceBranch: string;
     targetBranch: string;
-    attractorOptions: Array<{ id: string; name: string; defaultRunType: "planning" | "implementation" | "task" }>;
+    attractorOptions: Array<{
+      id: string;
+      name: string;
+      defaultRunType: "planning" | "implementation" | "task";
+      modelConfig: RunModelConfig | null;
+    }>;
   };
 }> {
   return apiRequest(`/api/projects/${projectId}/github/issues/${issueNumber}`);
@@ -207,7 +212,6 @@ export async function launchIssueRun(
     sourceBranch?: string;
     targetBranch?: string;
     specBundleId?: string;
-    modelConfig: RunModelConfig;
     force?: boolean;
   }
 ): Promise<{
@@ -417,6 +421,7 @@ export async function upsertGlobalAttractor(input: {
   content: string;
   repoPath?: string;
   defaultRunType: "planning" | "implementation" | "task";
+  modelConfig: RunModelConfig;
   description?: string;
   active?: boolean;
 }): Promise<GlobalAttractor> {
@@ -434,6 +439,7 @@ export async function updateGlobalAttractor(
     content?: string;
     repoPath?: string | null;
     defaultRunType?: "planning" | "implementation" | "task";
+    modelConfig?: RunModelConfig | null;
     description?: string | null;
     active?: boolean;
   }
@@ -454,6 +460,7 @@ export async function createAttractor(
     content: string;
     repoPath?: string;
     defaultRunType: "planning" | "implementation" | "task";
+    modelConfig: RunModelConfig;
     description?: string;
     active?: boolean;
   }
@@ -502,6 +509,7 @@ export async function updateProjectAttractor(
     content?: string;
     repoPath?: string | null;
     defaultRunType?: "planning" | "implementation" | "task";
+    modelConfig?: RunModelConfig | null;
     description?: string | null;
     active?: boolean;
   }
@@ -528,7 +536,6 @@ export async function createRun(input: {
   sourceBranch: string;
   targetBranch: string;
   specBundleId?: string;
-  modelConfig: RunModelConfig;
 }): Promise<{ runId: string; status: string }> {
   return apiRequest<{ runId: string; status: string }>("/api/runs", {
     method: "POST",

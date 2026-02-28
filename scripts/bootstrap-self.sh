@@ -23,12 +23,21 @@ bootstrap_payload=$(
   DEFAULT_BRANCH="$DEFAULT_BRANCH" \
   ATTRACTOR_PATH="$ATTRACTOR_PATH" \
   ATTRACTOR_CONTENT="$ATTRACTOR_CONTENT" \
+  MODEL_PROVIDER="$MODEL_PROVIDER" \
+  MODEL_ID="$MODEL_ID" \
+  REASONING_LEVEL="$REASONING_LEVEL" \
   node -e '
     const payload = {
       repoFullName: process.env.REPO_FULL_NAME,
       defaultBranch: process.env.DEFAULT_BRANCH,
       attractorPath: process.env.ATTRACTOR_PATH,
-      attractorContent: process.env.ATTRACTOR_CONTENT
+      attractorContent: process.env.ATTRACTOR_CONTENT,
+      modelConfig: {
+        provider: process.env.MODEL_PROVIDER,
+        modelId: process.env.MODEL_ID,
+        reasoningLevel: process.env.REASONING_LEVEL,
+        temperature: 0.2
+      }
     };
     process.stdout.write(JSON.stringify(payload));
   '
@@ -61,13 +70,7 @@ run_payload=$(cat <<JSON
   "attractorDefId": "$attractor_id",
   "runType": "planning",
   "sourceBranch": "$DEFAULT_BRANCH",
-  "targetBranch": "$TARGET_BRANCH",
-  "modelConfig": {
-    "provider": "$MODEL_PROVIDER",
-    "modelId": "$MODEL_ID",
-    "reasoningLevel": "$REASONING_LEVEL",
-    "temperature": 0.2
-  }
+  "targetBranch": "$TARGET_BRANCH"
 }
 JSON
 )
