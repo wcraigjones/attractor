@@ -161,6 +161,9 @@ export function buildRunnerJobManifest(input: {
   minioBucket: string;
   minioAccessKey: string;
   minioSecretKey: string;
+  githubAppId?: string;
+  githubAppPrivateKey?: string;
+  githubToken?: string;
   defaultServiceAccountName?: string;
 }): V1Job {
   const name = `factory-run-${input.runId}`.slice(0, 63);
@@ -230,6 +233,11 @@ export function buildRunnerJobManifest(input: {
                 { name: "MINIO_BUCKET", value: input.minioBucket },
                 { name: "MINIO_ACCESS_KEY", value: input.minioAccessKey },
                 { name: "MINIO_SECRET_KEY", value: input.minioSecretKey },
+                ...(input.githubAppId ? [{ name: "GITHUB_APP_ID", value: input.githubAppId }] : []),
+                ...(input.githubAppPrivateKey
+                  ? [{ name: "GITHUB_APP_PRIVATE_KEY", value: input.githubAppPrivateKey }]
+                  : []),
+                ...(input.githubToken ? [{ name: "GITHUB_TOKEN", value: input.githubToken }] : []),
                 ...input.secretEnv
               ],
               resources

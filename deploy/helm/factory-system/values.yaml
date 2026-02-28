@@ -36,6 +36,15 @@ service:
 web:
   apiBaseUrl: /api
 
+github:
+  appSlug: ""
+  appId: ""
+  appPrivateKey: ""
+  webhookSecret: ""
+  syncEnabled: ""
+  reconcileIntervalMinutes: 15
+  token: ""
+
 ingress:
   enabled: true
   className: ""

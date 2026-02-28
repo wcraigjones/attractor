@@ -201,6 +201,8 @@ export function AppShell() {
                 { to: `/projects/${selectedProjectId}`, label: "Overview" },
                 { to: `/projects/${selectedProjectId}/secrets`, label: "Secrets" },
                 { to: `/projects/${selectedProjectId}/attractors`, label: "Attractors" },
+                { to: `/projects/${selectedProjectId}/github/issues`, label: "GitHub Issues" },
+                { to: `/projects/${selectedProjectId}/github/pulls`, label: "PR Queue" },
                 { to: `/projects/${selectedProjectId}/runs`, label: "Runs" }
               ].map((item) => (
                 <NavLink

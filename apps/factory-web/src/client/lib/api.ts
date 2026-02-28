@@ -4,6 +4,9 @@ import type {
   AttractorDef,
   Environment,
   EnvironmentResources,
+  GitHubIssue,
+  GitHubPullQueueItem,
+  GitHubPullRequest,
   GlobalAttractor,
   GlobalSecret,
   Project,
@@ -70,6 +73,106 @@ export async function connectProjectRepo(
     method: "POST",
     body: JSON.stringify(input)
   });
+}
+
+export async function reconcileProjectGitHub(
+  projectId: string
+): Promise<{ projectId: string; issuesSynced: number; pullRequestsSynced: number }> {
+  return apiRequest<{ projectId: string; issuesSynced: number; pullRequestsSynced: number }>(
+    `/api/projects/${projectId}/github/reconcile`,
+    {
+      method: "POST"
+    }
+  );
+}
+
+export async function listProjectGitHubIssues(
+  projectId: string,
+  input?: { state?: "open" | "closed" | "all"; q?: string; limit?: number }
+): Promise<GitHubIssue[]> {
+  const query = new URLSearchParams();
+  if (input?.state) {
+    query.set("state", input.state);
+  }
+  if (input?.q) {
+    query.set("q", input.q);
+  }
+  if (input?.limit) {
+    query.set("limit", String(input.limit));
+  }
+  const payload = await apiRequest<{ issues: GitHubIssue[] }>(
+    `/api/projects/${projectId}/github/issues${query.toString() ? `?${query}` : ""}`
+  );
+  return payload.issues;
+}
+
+export async function getProjectGitHubIssue(
+  projectId: string,
+  issueNumber: number
+): Promise<{
+  issue: GitHubIssue;
+  runs: Run[];
+  pullRequests: GitHubPullRequest[];
+  launchDefaults: {
+    sourceBranch: string;
+    targetBranch: string;
+    attractorOptions: Array<{ id: string; name: string; defaultRunType: "planning" | "implementation" | "task" }>;
+  };
+}> {
+  return apiRequest(`/api/projects/${projectId}/github/issues/${issueNumber}`);
+}
+
+export async function listProjectGitHubPulls(
+  projectId: string,
+  input?: { state?: "open" | "closed" | "all"; limit?: number }
+): Promise<GitHubPullQueueItem[]> {
+  const query = new URLSearchParams();
+  if (input?.state) {
+    query.set("state", input.state);
+  }
+  if (input?.limit) {
+    query.set("limit", String(input.limit));
+  }
+  const payload = await apiRequest<{ pulls: GitHubPullQueueItem[] }>(
+    `/api/projects/${projectId}/github/pulls${query.toString() ? `?${query}` : ""}`
+  );
+  return payload.pulls;
+}
+
+export async function getProjectGitHubPull(
+  projectId: string,
+  prNumber: number
+): Promise<{ pull: GitHubPullQueueItem }> {
+  return apiRequest(`/api/projects/${projectId}/github/pulls/${prNumber}`);
+}
+
+export async function launchIssueRun(
+  projectId: string,
+  issueNumber: number,
+  input: {
+    attractorDefId: string;
+    environmentId?: string;
+    runType: "planning" | "implementation" | "task";
+    sourceBranch?: string;
+    targetBranch?: string;
+    specBundleId?: string;
+    modelConfig: RunModelConfig;
+    force?: boolean;
+  }
+): Promise<{
+  runId: string;
+  status: string;
+  sourceBranch: string;
+  targetBranch: string;
+  githubIssue: GitHubIssue;
+}> {
+  return apiRequest(
+    `/api/projects/${projectId}/github/issues/${issueNumber}/runs`,
+    {
+      method: "POST",
+      body: JSON.stringify(input)
+    }
+  );
 }
 
 export async function createProject(input: {

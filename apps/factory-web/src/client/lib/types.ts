@@ -105,6 +105,8 @@ export interface Run {
   id: string;
   projectId: string;
   attractorDefId: string;
+  githubIssueId: string | null;
+  githubPullRequestId: string | null;
   environmentId: string | null;
   runType: RunType;
   sourceBranch: string;
@@ -117,7 +119,61 @@ export interface Run {
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
+  githubIssue?: GitHubIssue | null;
+  githubPullRequest?: GitHubPullRequest | null;
   events?: RunEvent[];
+}
+
+export interface GitHubIssue {
+  id: string;
+  projectId: string;
+  issueNumber: number;
+  state: string;
+  title: string;
+  body: string | null;
+  author: string | null;
+  labelsJson: unknown | null;
+  assigneesJson: unknown | null;
+  url: string;
+  openedAt: string;
+  closedAt: string | null;
+  updatedAt: string;
+  syncedAt: string;
+  createdAt: string;
+  runCount?: number;
+  pullRequestCount?: number;
+}
+
+export interface GitHubPullRequest {
+  id: string;
+  projectId: string;
+  prNumber: number;
+  state: string;
+  title: string;
+  body: string | null;
+  url: string;
+  headRefName: string;
+  headSha: string;
+  baseRefName: string;
+  mergedAt: string | null;
+  openedAt: string;
+  closedAt: string | null;
+  updatedAt: string;
+  syncedAt: string;
+  linkedIssueId: string | null;
+}
+
+export interface GitHubPullQueueItem {
+  pullRequest: GitHubPullRequest & { linkedIssue?: GitHubIssue | null };
+  linkedRunId: string | null;
+  reviewDecision: ReviewDecision | null;
+  reviewStatus: "Pending" | "Completed" | "Overdue";
+  risk: "low" | "medium" | "high";
+  dueAt: string;
+  minutesRemaining: number;
+  criticalCount: number;
+  artifactCount: number;
+  openPackPath: string | null;
 }
 
 export interface RunQuestion {
@@ -151,6 +207,14 @@ export interface RunReview {
   criticalFindings: string | null;
   artifactFindings: string | null;
   attestation: string | null;
+  reviewedHeadSha: string | null;
+  summarySnapshotJson: unknown | null;
+  criticalSectionsSnapshotJson: unknown | null;
+  artifactFocusSnapshotJson: unknown | null;
+  githubCheckRunId: string | null;
+  githubSummaryCommentId: string | null;
+  githubWritebackStatus: string | null;
+  githubWritebackAt: string | null;
   reviewedAt: string;
   createdAt: string;
   updatedAt: string;
@@ -191,6 +255,9 @@ export interface RunReviewResponse {
   review: RunReview | null;
   checklistTemplate: ReviewChecklistTemplateItem[];
   pack: RunReviewPack;
+  github?: {
+    pullRequest?: GitHubPullRequest | null;
+  };
 }
 
 export interface Artifact {

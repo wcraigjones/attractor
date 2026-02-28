@@ -35,6 +35,7 @@ Each run review pack includes:
 
 5. Decision + evidence
 - Decision values: `APPROVE`, `REQUEST_CHANGES`, `REJECT`, `EXCEPTION`.
+- Any non-empty reviewer feedback forces a non-approval outcome (`REQUEST_CHANGES` unless explicitly `REJECT`).
 - Non-approval decisions require notes.
 - Approvals require all checklist items.
 

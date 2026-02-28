@@ -82,6 +82,10 @@ Web route map:
 - `/projects/:projectId`
 - `/projects/:projectId/secrets`
 - `/projects/:projectId/attractors`
+- `/projects/:projectId/github/issues`
+- `/projects/:projectId/github/issues/:issueNumber`
+- `/projects/:projectId/github/pulls`
+- `/projects/:projectId/github/pulls/:prNumber`
 - `/projects/:projectId/runs`
 - `/runs/:runId`
 - `/runs/:runId/artifacts/:artifactId`
@@ -163,6 +167,13 @@ Implemented endpoints:
 - `POST /api/projects/{projectId}/environment`
 - `POST /api/bootstrap/self`
 - `POST /api/projects/{projectId}/repo/connect/github`
+- `POST /api/github/webhooks`
+- `POST /api/projects/{projectId}/github/reconcile`
+- `GET /api/projects/{projectId}/github/issues`
+- `GET /api/projects/{projectId}/github/issues/{issueNumber}`
+- `POST /api/projects/{projectId}/github/issues/{issueNumber}/runs`
+- `GET /api/projects/{projectId}/github/pulls`
+- `GET /api/projects/{projectId}/github/pulls/{prNumber}`
 - `POST /api/projects/{projectId}/secrets`
 - `GET /api/projects/{projectId}/secrets`
 - `POST /api/projects/{projectId}/attractors`

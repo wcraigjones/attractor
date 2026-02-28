@@ -80,6 +80,8 @@ export interface Run {
   id: string;
   projectId: string;
   attractorDefId: string;
+  githubIssueId: string | null;
+  githubPullRequestId: string | null;
   environmentId: string | null;
   runType: RunType;
   sourceBranch: string;
@@ -92,6 +94,54 @@ export interface Run {
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
+}
+
+export interface GitHubIssue {
+  id: string;
+  projectId: string;
+  issueNumber: number;
+  state: string;
+  title: string;
+  body: string | null;
+  author: string | null;
+  labelsJson: unknown | null;
+  assigneesJson: unknown | null;
+  url: string;
+  openedAt: string;
+  closedAt: string | null;
+  updatedAt: string;
+  syncedAt: string;
+  createdAt: string;
+}
+
+export interface GitHubPullRequest {
+  id: string;
+  projectId: string;
+  prNumber: number;
+  state: string;
+  title: string;
+  body: string | null;
+  url: string;
+  headRefName: string;
+  headSha: string;
+  baseRefName: string;
+  mergedAt: string | null;
+  openedAt: string;
+  closedAt: string | null;
+  updatedAt: string;
+  syncedAt: string;
+  linkedIssueId: string | null;
+}
+
+export interface GitHubSyncState {
+  projectId: string;
+  issuesCursor: string | null;
+  pullsCursor: string | null;
+  lastIssueSyncAt: string | null;
+  lastPullSyncAt: string | null;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export type RunQuestionStatus = "PENDING" | "ANSWERED" | "TIMEOUT";

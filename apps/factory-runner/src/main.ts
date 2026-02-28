@@ -690,9 +690,9 @@ async function createPullRequest(args: {
   repoFullName: string;
   baseBranch: string;
   headBranch: string;
-  runId: string;
+  title: string;
   body: string;
-}): Promise<string | null> {
+}): Promise<{ url: string | null; number: number | null; headSha: string | null }> {
   const [owner, repo] = args.repoFullName.split("/");
   if (!owner || !repo) {
     throw new Error(`Invalid repoFullName: ${args.repoFullName}`);
@@ -707,16 +707,20 @@ async function createPullRequest(args: {
         repo,
         base: args.baseBranch,
         head: args.headBranch,
-        title: `Attractor run ${args.runId}`,
+        title: args.title,
         body: args.body
       });
-      return pr.data.html_url ?? null;
+      return {
+        url: pr.data.html_url ?? null,
+        number: pr.data.number ?? null,
+        headSha: pr.data.head?.sha ?? null
+      };
     }
   }
 
   const token = process.env.GITHUB_TOKEN;
   if (!token) {
-    return null;
+    return { url: null, number: null, headSha: null };
   }
 
   const { Octokit } = await import("@octokit/rest");
@@ -726,10 +730,14 @@ async function createPullRequest(args: {
     repo,
     base: args.baseBranch,
     head: args.headBranch,
-    title: `Attractor run ${args.runId}`,
+    title: args.title,
     body: args.body
   });
-  return pr.data.html_url ?? null;
+  return {
+    url: pr.data.html_url ?? null,
+    number: pr.data.number ?? null,
+    headSha: pr.data.head?.sha ?? null
+  };
 }
 
 async function assertRunNotCanceled(runId: string): Promise<void> {
@@ -1080,7 +1088,9 @@ async function processRun(spec: RunExecutionSpec): Promise<void> {
       project: true,
       attractorDef: true,
       referencedSpecBundle: true,
-      checkpoint: true
+      checkpoint: true,
+      githubIssue: true,
+      githubPullRequest: true
     }
   });
 
@@ -1216,12 +1226,22 @@ async function processRun(spec: RunExecutionSpec): Promise<void> {
 
     const planPath = manifest.artifacts?.find((artifact) => artifact.path.endsWith("plan.md"))?.path;
     const planText = planPath ? await getObjectString(planPath) : "No plan.md found in bundle";
+    const issueContext = run.githubIssue
+      ? [
+          `Linked GitHub issue: #${run.githubIssue.issueNumber}`,
+          `Issue title: ${run.githubIssue.title}`,
+          `Issue URL: ${run.githubIssue.url}`,
+          "Issue body:",
+          run.githubIssue.body ?? "(empty)"
+        ].join("\n")
+      : "No linked GitHub issue.";
 
     const implementPrompt = [
       "You are implementing a planned change in a repository.",
       `Repository: ${run.project.repoFullName}`,
       `Source branch: ${run.sourceBranch}`,
       `Target branch: ${run.targetBranch}`,
+      issueContext,
       "Use the plan to produce concrete code changes.",
       "Return a concise summary and a valid unified git diff in a fenced ```diff block.",
       "The diff must be directly applicable from repository root with git apply.",
@@ -1301,6 +1321,7 @@ async function processRun(spec: RunExecutionSpec): Promise<void> {
 
     await runCommand("git", ["commit", "-m", `attractor: implementation run ${run.id}`], workDir);
     await runCommand("git", ["push", "origin", run.targetBranch, "--force-with-lease"], workDir);
+    const pushedHeadSha = (await runCommand("git", ["rev-parse", "HEAD"], workDir)).trim();
 
     let prUrl: string | null = null;
     const artifactPath = `runs/${run.projectId}/${run.id}/implementation-note.md`;
@@ -1315,28 +1336,87 @@ async function processRun(spec: RunExecutionSpec): Promise<void> {
       }
     });
 
-    prUrl = await createPullRequest({
+    const prTitle = run.githubIssue
+      ? `[#${run.githubIssue.issueNumber}] ${run.githubIssue.title}`
+      : `Attractor run ${run.id}`;
+    const prBody = [
+      `Automated implementation run ${run.id}.`,
+      run.githubIssue ? `Closes #${run.githubIssue.issueNumber}` : "",
+      "",
+      "## Implementation Summary",
+      implementationText.slice(0, 5000)
+    ]
+      .filter((item) => item.length > 0)
+      .join("\n");
+
+    const prResult = await createPullRequest({
       installationId: run.project.githubInstallationId ?? undefined,
       repoFullName: run.project.repoFullName,
       baseBranch: run.project.defaultBranch ?? run.sourceBranch,
       headBranch: run.targetBranch,
-      runId: run.id,
-      body: `Automated implementation run ${run.id}`
+      title: prTitle,
+      body: prBody
     });
+    prUrl = prResult.url;
+
+    let githubPullRequestId: string | null = run.githubPullRequestId;
+    if (prResult.number) {
+      const linkedPr = await prisma.gitHubPullRequest.upsert({
+        where: {
+          projectId_prNumber: {
+            projectId: run.projectId,
+            prNumber: prResult.number
+          }
+        },
+        update: {
+          state: "open",
+          title: prTitle,
+          body: prBody,
+          url: prUrl ?? "",
+          headRefName: run.targetBranch,
+          headSha: prResult.headSha ?? pushedHeadSha,
+          baseRefName: run.project.defaultBranch ?? run.sourceBranch,
+          mergedAt: null,
+          updatedAt: new Date(),
+          syncedAt: new Date(),
+          ...(run.githubIssueId ? { linkedIssueId: run.githubIssueId } : {})
+        },
+        create: {
+          projectId: run.projectId,
+          prNumber: prResult.number,
+          state: "open",
+          title: prTitle,
+          body: prBody,
+          url: prUrl ?? "",
+          headRefName: run.targetBranch,
+          headSha: prResult.headSha ?? pushedHeadSha,
+          baseRefName: run.project.defaultBranch ?? run.sourceBranch,
+          mergedAt: null,
+          openedAt: new Date(),
+          closedAt: null,
+          updatedAt: new Date(),
+          syncedAt: new Date(),
+          ...(run.githubIssueId ? { linkedIssueId: run.githubIssueId } : {})
+        }
+      });
+      githubPullRequestId = linkedPr.id;
+    }
 
     await prisma.run.update({
       where: { id: run.id },
       data: {
         status: RunStatus.SUCCEEDED,
         finishedAt: new Date(),
-        prUrl
+        prUrl,
+        githubPullRequestId
       }
     });
 
     await appendRunEvent(run.id, "RunCompleted", {
       runId: run.id,
       status: "SUCCEEDED",
-      prUrl
+      prUrl,
+      prNumber: prResult.number
     });
   } finally {
     rmSync(workDir, { recursive: true, force: true });

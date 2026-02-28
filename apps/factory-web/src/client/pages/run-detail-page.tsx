@@ -107,6 +107,7 @@ export function RunDetailPage() {
   const [reviewForm, setReviewForm] = useState<ReviewFormState>(emptyReviewForm());
   const [reviewFormInitialized, setReviewFormInitialized] = useState(false);
   const [questionAnswers, setQuestionAnswers] = useState<Record<string, string>>({});
+  const [reviewPackTab, setReviewPackTab] = useState<"summary" | "critical" | "artifacts">("summary");
 
   const runQuery = useQuery({
     queryKey: ["run", runId],
@@ -551,6 +552,9 @@ export function RunDetailPage() {
                   </Badge>
                   <Badge variant="secondary">{formatMinutesRemaining(reviewQuery.data.pack.minutesRemaining)}</Badge>
                   <Badge variant="outline">Due {new Date(reviewQuery.data.pack.dueAt).toLocaleString()}</Badge>
+                  {reviewQuery.data.github?.pullRequest ? (
+                    <Badge variant="outline">PR #{reviewQuery.data.github.pullRequest.prNumber}</Badge>
+                  ) : null}
                 </div>
                 {reviewQuery.data.review ? (
                   <p>
@@ -563,92 +567,135 @@ export function RunDetailPage() {
                 ) : (
                   <p className="text-muted-foreground">No review has been submitted for this run yet.</p>
                 )}
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle>Review Pack</CardTitle>
-                <CardDescription>
-                  Context summary, critical sections, and artifact focus generated from run outputs.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div>
-                  <p className="mb-2 text-sm font-medium">Summary Suggestion</p>
-                  <p className="whitespace-pre-wrap rounded-md border border-border bg-muted/30 p-3 text-sm">
-                    {reviewQuery.data.pack.summarySuggestion || "No implementation summary artifact found."}
+                {reviewQuery.data.review?.githubWritebackStatus ? (
+                  <p>
+                    GitHub writeback:{" "}
+                    <Badge variant={reviewQuery.data.review.githubWritebackStatus === "SUCCEEDED" ? "success" : "warning"}>
+                      {reviewQuery.data.review.githubWritebackStatus}
+                    </Badge>
                   </p>
-                </div>
-
-                <div>
-                  <p className="mb-2 text-sm font-medium">Critical Sections</p>
-                  {reviewQuery.data.pack.criticalSections.length === 0 ? (
-                    <p className="text-sm text-muted-foreground">
-                      No patch artifact was found. Use the artifacts list and linked PR for manual inspection.
-                    </p>
-                  ) : (
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead>Path</TableHead>
-                          <TableHead>Risk</TableHead>
-                          <TableHead>Reason</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {reviewQuery.data.pack.criticalSections.map((section) => (
-                          <TableRow key={section.path}>
-                            <TableCell className="mono text-xs">{section.path}</TableCell>
-                            <TableCell>
-                              <Badge variant={section.riskLevel === "high" ? "destructive" : section.riskLevel === "medium" ? "warning" : "secondary"}>
-                                {section.riskLevel}
-                              </Badge>
-                            </TableCell>
-                            <TableCell>{section.reason}</TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  )}
-                </div>
-
-                <div>
-                  <p className="mb-2 text-sm font-medium">Artifact Focus</p>
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Artifact</TableHead>
-                        <TableHead>Reason</TableHead>
-                        <TableHead>Open</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {reviewQuery.data.pack.artifactFocus.map((artifact) => (
-                        <TableRow key={artifact.id}>
-                          <TableCell className="mono text-xs">{artifact.key}</TableCell>
-                          <TableCell>{artifact.reason}</TableCell>
-                          <TableCell>
-                            <Button asChild size="sm" variant="outline">
-                              <Link to={`/runs/${run.id}/artifacts/${artifact.id}`}>View</Link>
-                            </Button>
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
+                ) : null}
               </CardContent>
             </Card>
 
-            <Card>
-              <CardHeader>
-                <CardTitle>Reviewer Decision</CardTitle>
-                <CardDescription>
-                  Approvals require all checklist items. Request changes/reject decisions must include notes.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
+            <div className="grid gap-4 lg:grid-cols-[2fr,1fr]">
+              <Card>
+                <CardHeader>
+                  <CardTitle>Review Pack</CardTitle>
+                  <CardDescription>
+                    Summary, critical sections, and artifacts aligned to the batch review workflow.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      variant={reviewPackTab === "summary" ? "default" : "outline"}
+                      size="sm"
+                      onClick={() => setReviewPackTab("summary")}
+                    >
+                      Summary
+                    </Button>
+                    <Button
+                      variant={reviewPackTab === "critical" ? "default" : "outline"}
+                      size="sm"
+                      onClick={() => setReviewPackTab("critical")}
+                    >
+                      Critical Sections
+                    </Button>
+                    <Button
+                      variant={reviewPackTab === "artifacts" ? "default" : "outline"}
+                      size="sm"
+                      onClick={() => setReviewPackTab("artifacts")}
+                    >
+                      Artifacts
+                    </Button>
+                  </div>
+
+                  {reviewPackTab === "summary" ? (
+                    <div>
+                      <p className="mb-2 text-sm font-medium">Context Summary</p>
+                      <p className="whitespace-pre-wrap rounded-md border border-border bg-muted/30 p-3 text-sm">
+                        {reviewQuery.data.pack.summarySuggestion || "No implementation summary artifact found."}
+                      </p>
+                    </div>
+                  ) : null}
+
+                  {reviewPackTab === "critical" ? (
+                    <div>
+                      <p className="mb-2 text-sm font-medium">Critical Sections</p>
+                      {reviewQuery.data.pack.criticalSections.length === 0 ? (
+                        <p className="text-sm text-muted-foreground">
+                          No patch artifact was found. Use artifacts or the linked PR for manual inspection.
+                        </p>
+                      ) : (
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead>Path</TableHead>
+                              <TableHead>Risk</TableHead>
+                              <TableHead>Reason</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {reviewQuery.data.pack.criticalSections.map((section) => (
+                              <TableRow key={section.path}>
+                                <TableCell className="mono text-xs">{section.path}</TableCell>
+                                <TableCell>
+                                  <Badge variant={section.riskLevel === "high" ? "destructive" : section.riskLevel === "medium" ? "warning" : "secondary"}>
+                                    {section.riskLevel}
+                                  </Badge>
+                                </TableCell>
+                                <TableCell>{section.reason}</TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      )}
+                    </div>
+                  ) : null}
+
+                  {reviewPackTab === "artifacts" ? (
+                    <div>
+                      <p className="mb-2 text-sm font-medium">Artifact Focus</p>
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>Artifact</TableHead>
+                            <TableHead>Reason</TableHead>
+                            <TableHead>Open</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {reviewQuery.data.pack.artifactFocus.map((artifact) => (
+                            <TableRow key={artifact.id}>
+                              <TableCell className="mono text-xs">{artifact.key}</TableCell>
+                              <TableCell>{artifact.reason}</TableCell>
+                              <TableCell>
+                                <Button asChild size="sm" variant="outline">
+                                  <Link to={`/runs/${run.id}/artifacts/${artifact.id}`}>View</Link>
+                                </Button>
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </div>
+                  ) : null}
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle>Reviewer Action Pane</CardTitle>
+                  <CardDescription>
+                    Any non-empty feedback text is treated as non-approval.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="rounded-md border border-border bg-muted/30 p-3 text-sm">
+                    Compliance rule: feedback in summary/critical/artifact notes forces a non-approval decision.
+                  </div>
+
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-2">
                     <label className="text-sm font-medium" htmlFor="reviewer-name">Reviewer</label>
@@ -766,8 +813,9 @@ export function RunDetailPage() {
                 >
                   {saveReviewMutation.isPending ? "Saving..." : "Save Review Decision"}
                 </Button>
-              </CardContent>
-            </Card>
+                </CardContent>
+              </Card>
+            </div>
           </div>
         )
       ) : null}
