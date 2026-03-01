@@ -7,6 +7,7 @@ import { DashboardPage } from "./pages/dashboard-page";
 import { GlobalAttractorsPage } from "./pages/global-attractors-page";
 import { GlobalEnvironmentsPage } from "./pages/global-environments-page";
 import { GlobalSecretsPage } from "./pages/global-secrets-page";
+import { GlobalTaskTemplatesPage } from "./pages/global-task-templates-page";
 import { NotFoundPage } from "./pages/not-found-page";
 import { ProjectAttractorsPage } from "./pages/project-attractors-page";
 import { ProjectGitHubIssueDetailPage } from "./pages/project-github-issue-detail-page";
@@ -18,6 +19,7 @@ import { ProjectsPage } from "./pages/projects-page";
 import { ProjectEnvironmentsPage } from "./pages/project-environments-page";
 import { ProjectRunsPage } from "./pages/project-runs-page";
 import { ProjectSecretsPage } from "./pages/project-secrets-page";
+import { ProjectTaskTemplatesPage } from "./pages/project-task-templates-page";
 import { RunDetailPage } from "./pages/run-detail-page";
 
 export function App() {
@@ -29,12 +31,14 @@ export function App() {
         <Route path="environments/global" element={<GlobalEnvironmentsPage />} />
         <Route path="attractors/global" element={<GlobalAttractorsPage />} />
         <Route path="attractors/global/:attractorId" element={<GlobalAttractorStudioPage />} />
+        <Route path="task-templates/global" element={<GlobalTaskTemplatesPage />} />
         <Route path="secrets/global" element={<GlobalSecretsPage />} />
         <Route path="projects/:projectId" element={<ProjectOverviewPage />} />
         <Route path="projects/:projectId/environments" element={<ProjectEnvironmentsPage />} />
         <Route path="projects/:projectId/secrets" element={<ProjectSecretsPage />} />
         <Route path="projects/:projectId/attractors" element={<ProjectAttractorsPage />} />
         <Route path="projects/:projectId/attractors/:attractorId" element={<ProjectAttractorStudioPage />} />
+        <Route path="projects/:projectId/task-templates" element={<ProjectTaskTemplatesPage />} />
         <Route path="projects/:projectId/github/issues" element={<ProjectGitHubIssuesPage />} />
         <Route path="projects/:projectId/github/issues/:issueNumber" element={<ProjectGitHubIssueDetailPage />} />
         <Route path="projects/:projectId/github/pulls" element={<ProjectGitHubPrQueuePage />} />

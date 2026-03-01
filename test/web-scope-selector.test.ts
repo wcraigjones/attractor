@@ -5,6 +5,7 @@ import {
   GLOBAL_SCOPE_VALUE,
   isGlobalAttractorsPath,
   isGlobalEnvironmentsPath,
+  isGlobalTaskTemplatesPath,
   resolveSelectedScope,
   scopeToPath
 } from "../apps/factory-web/src/client/lib/scope-selector";
@@ -34,6 +35,13 @@ describe("scope selector helpers", () => {
       GLOBAL_SCOPE_VALUE
     );
     expect(isGlobalEnvironmentsPath("/environments/global")).toBe(true);
+  });
+
+  it("resolves /task-templates/global path to global scope sentinel", () => {
+    expect(resolveSelectedScope({ pathname: "/task-templates/global", fallbackProjectId: "proj-1" })).toBe(
+      GLOBAL_SCOPE_VALUE
+    );
+    expect(isGlobalTaskTemplatesPath("/task-templates/global")).toBe(true);
   });
 
   it("keeps global scope fallback on non-project routes", () => {

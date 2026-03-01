@@ -44,6 +44,18 @@ enum RunQuestionStatus {
   TIMEOUT
 }
 
+enum TaskTemplateEnvironmentMode {
+  PROJECT_DEFAULT
+  NAMED
+}
+
+enum TaskTemplateLaunchMode {
+  MANUAL
+  SCHEDULE
+  EVENT
+  REPLAY
+}
+
 model Project {
   id                   String         @id @default(cuid())
   name                 String
@@ -57,6 +69,8 @@ model Project {
   secrets              ProjectSecret[]
   attractors           AttractorDef[]
   runs                 Run[]
+  taskTemplates        TaskTemplate[]
+  taskTemplateEvents   TaskTemplateEventLedger[]
   githubIssues         GitHubIssue[]
   githubPullRequests   GitHubPullRequest[]
   githubSyncState      GitHubSyncState?
@@ -88,6 +102,25 @@ model GlobalAttractor {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
   versions       GlobalAttractorVersion[]
+}
+
+model GlobalTaskTemplate {
+  id              String                      @id @default(cuid())
+  name            String                      @unique
+  attractorName   String
+  runType         RunType
+  sourceBranch    String?
+  targetBranch    String?
+  environmentMode TaskTemplateEnvironmentMode @default(PROJECT_DEFAULT)
+  environmentName String?
+  scheduleEnabled Boolean                     @default(false)
+  scheduleCron    String?
+  scheduleTimezone String?
+  triggersJson    Json?
+  description     String?
+  active          Boolean                     @default(true)
+  createdAt       DateTime                    @default(now())
+  updatedAt       DateTime                    @updatedAt
 }
 
 model ProjectSecret {
@@ -157,6 +190,8 @@ model Run {
   id            String      @id @default(cuid())
   projectId     String
   attractorDefId String
+  taskTemplateId String?
+  taskTemplateLaunchMode TaskTemplateLaunchMode?
   attractorContentPath String?
   attractorContentVersion Int?
   attractorContentSha256 String?
@@ -176,6 +211,7 @@ model Run {
   finishedAt    DateTime?
   project       Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
   attractorDef  AttractorDef @relation(fields: [attractorDefId], references: [id], onDelete: Cascade)
+  taskTemplate  TaskTemplate? @relation(fields: [taskTemplateId], references: [id], onDelete: SetNull)
   githubIssue   GitHubIssue? @relation(fields: [githubIssueId], references: [id], onDelete: SetNull)
   githubPullRequest GitHubPullRequest? @relation(fields: [githubPullRequestId], references: [id], onDelete: SetNull)
   environment   Environment? @relation(fields: [environmentId], references: [id], onDelete: SetNull)
@@ -185,6 +221,7 @@ model Run {
   checkpoint    RunCheckpoint?
   nodeOutcomes  RunNodeOutcome[]
   questions     RunQuestion[]
+  taskTemplateEvents TaskTemplateEventLedger[]
   producedSpecBundle SpecBundle? @relation("ProducedSpecBundle")
   referencedSpecBundle SpecBundle? @relation("ReferencedSpecBundle", fields: [specBundleId], references: [id], onDelete: SetNull)
 
@@ -193,6 +230,7 @@ model Run {
   @@index([githubIssueId])
   @@index([githubPullRequestId])
   @@index([environmentId])
+  @@index([taskTemplateId])
 }
 
 model RunReview {
@@ -370,4 +408,62 @@ model RunQuestion {
   run        Run               @relation(fields: [runId], references: [id], onDelete: Cascade)
 
   @@index([runId, status, createdAt])
+}
+
+model TaskTemplate {
+  id               String                      @id @default(cuid())
+  projectId        String
+  scope            AttractorScope              @default(PROJECT)
+  name             String
+  attractorName    String
+  runType          RunType
+  sourceBranch     String?
+  targetBranch     String?
+  environmentMode  TaskTemplateEnvironmentMode @default(PROJECT_DEFAULT)
+  environmentName  String?
+  scheduleEnabled  Boolean                     @default(false)
+  scheduleCron     String?
+  scheduleTimezone String?
+  scheduleNextRunAt DateTime?
+  scheduleLastRunAt DateTime?
+  scheduleLastError String?
+  triggersJson     Json?
+  description      String?
+  active           Boolean                     @default(true)
+  createdAt        DateTime                    @default(now())
+  updatedAt        DateTime                    @updatedAt
+  project          Project                     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  runs             Run[]
+  eventLedger      TaskTemplateEventLedger[]
+
+  @@unique([projectId, name, scope])
+  @@index([projectId, active, scheduleEnabled, scheduleNextRunAt])
+  @@index([projectId, scope])
+}
+
+model TaskTemplateEventLedger {
+  id             String       @id @default(cuid())
+  projectId      String
+  taskTemplateId String
+  runId          String?
+  eventName      String
+  eventAction    String?
+  dedupeKey      String
+  deliveryId     String?
+  entityType     String?
+  entityNumber   Int?
+  matchedRuleIds Json?
+  payload        Json
+  status         String
+  reason         String?
+  replayedAt     DateTime?
+  createdAt      DateTime     @default(now())
+  project        Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  taskTemplate   TaskTemplate @relation(fields: [taskTemplateId], references: [id], onDelete: Cascade)
+  run            Run?         @relation(fields: [runId], references: [id], onDelete: SetNull)
+
+  @@unique([taskTemplateId, dedupeKey])
+  @@index([projectId, createdAt])
+  @@index([taskTemplateId, createdAt])
+  @@index([runId])
 }

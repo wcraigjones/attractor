@@ -347,6 +347,12 @@ spec:
               value: {{ .Values.shell.sessionTtlSeconds | quote }}
             - name: SHELL_POD_READY_TIMEOUT_SECONDS
               value: {{ .Values.shell.podReadyTimeoutSeconds | quote }}
+            - name: TASK_TEMPLATE_SCHEDULER_ENABLED
+              value: {{ .Values.taskTemplateScheduler.enabled | quote }}
+            - name: TASK_TEMPLATE_SCHEDULER_INTERVAL_SECONDS
+              value: {{ .Values.taskTemplateScheduler.intervalSeconds | quote }}
+            - name: TASK_TEMPLATE_SCHEDULER_BATCH_SIZE
+              value: {{ .Values.taskTemplateScheduler.batchSize | quote }}
             - name: FACTORY_AUTH_GOOGLE_CLIENT_ID
               value: {{ .Values.auth.googleClientId | quote }}
             - name: FACTORY_AUTH_GOOGLE_CLIENT_SECRET

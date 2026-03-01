@@ -17,8 +17,17 @@ export function isGlobalEnvironmentsPath(pathname: string): boolean {
   return pathname === "/environments/global" || pathname.startsWith("/environments/global/");
 }
 
+export function isGlobalTaskTemplatesPath(pathname: string): boolean {
+  return pathname === "/task-templates/global" || pathname.startsWith("/task-templates/global/");
+}
+
 export function isGlobalScopePath(pathname: string): boolean {
-  return isGlobalSecretsPath(pathname) || isGlobalAttractorsPath(pathname) || isGlobalEnvironmentsPath(pathname);
+  return (
+    isGlobalSecretsPath(pathname) ||
+    isGlobalAttractorsPath(pathname) ||
+    isGlobalEnvironmentsPath(pathname) ||
+    isGlobalTaskTemplatesPath(pathname)
+  );
 }
 
 export function resolveSelectedScope(input: {

@@ -108,12 +108,14 @@ Web route map:
 - `/environments/global`
 - `/attractors/global`
 - `/attractors/global/:attractorId`
+- `/task-templates/global`
 - `/secrets/global`
 - `/projects/:projectId`
 - `/projects/:projectId/environments`
 - `/projects/:projectId/secrets`
 - `/projects/:projectId/attractors`
 - `/projects/:projectId/attractors/:attractorId`
+- `/projects/:projectId/task-templates`
 - `/projects/:projectId/github/issues`
 - `/projects/:projectId/github/issues/:issueNumber`
 - `/projects/:projectId/github/pulls`
@@ -124,6 +126,18 @@ Web route map:
 - `/auth/google/start` (when auth is enabled)
 - `/auth/google/callback` (when auth is enabled)
 - `/auth/logout` (when auth is enabled)
+
+## Task Templates (Concept)
+
+Task templates are reusable run launch definitions layered on top of attractors. A template captures defaults such as run type, branch strategy, environment/model overrides, and input mapping.
+
+Templates can be launched in three ways:
+
+- On demand (manual run now)
+- Periodically (scheduled runs)
+- Event-triggered (for example when a GitHub PR is merged or an issue is opened)
+
+Event-triggered templates should use filters and idempotency keys so webhook retries or replayed sync events do not enqueue duplicate runs.
 
 ## Self-Bootstrap Run
 
@@ -204,6 +218,10 @@ Implemented endpoints:
 - `PATCH /api/attractors/global/{attractorId}`
 - `GET /api/attractors/global/{attractorId}/versions`
 - `GET /api/attractors/global/{attractorId}/versions/{version}`
+- `POST /api/task-templates/global`
+- `GET /api/task-templates/global`
+- `GET /api/task-templates/global/{templateId}`
+- `PATCH /api/task-templates/global/{templateId}`
 - `POST /api/projects`
 - `GET /api/projects`
 - `POST /api/projects/{projectId}/environment`
@@ -229,6 +247,13 @@ Implemented endpoints:
 - `PATCH /api/projects/{projectId}/attractors/{attractorId}`
 - `GET /api/projects/{projectId}/attractors/{attractorId}/versions`
 - `GET /api/projects/{projectId}/attractors/{attractorId}/versions/{version}`
+- `POST /api/projects/{projectId}/task-templates`
+- `GET /api/projects/{projectId}/task-templates`
+- `GET /api/projects/{projectId}/task-templates/{templateId}`
+- `PATCH /api/projects/{projectId}/task-templates/{templateId}`
+- `POST /api/projects/{projectId}/task-templates/{templateId}/runs`
+- `GET /api/projects/{projectId}/task-templates/events`
+- `POST /api/projects/{projectId}/task-templates/events/{eventId}/replay`
 - `GET /api/projects/{projectId}/runs`
 - `POST /api/runs`
 - `POST /api/projects/{projectId}/self-iterate`

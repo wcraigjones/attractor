@@ -58,6 +58,11 @@ shell:
   sessionTtlSeconds: 1800
   podReadyTimeoutSeconds: 90
 
+taskTemplateScheduler:
+  enabled: true
+  intervalSeconds: 30
+  batchSize: 50
+
 ingress:
   enabled: true
   className: ""

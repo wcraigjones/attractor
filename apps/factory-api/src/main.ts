@@ -13,7 +13,9 @@ import {
   ReviewDecision,
   RunQuestionStatus,
   RunStatus,
-  RunType
+  RunType,
+  TaskTemplateEnvironmentMode,
+  TaskTemplateLaunchMode
 } from "@prisma/client";
 import { Redis } from "ioredis";
 import { getModels, getProviders } from "@mariozechner/pi-ai";
@@ -78,6 +80,17 @@ import {
   RUN_REVIEW_FRAMEWORK_VERSION,
   summarizeImplementationNote
 } from "./run-review.js";
+import {
+  canonicalDedupeKey,
+  isHumanActor,
+  isValidIanaTimeZone,
+  matchesTriggerRule,
+  nextCronDate,
+  parseTaskTemplateTriggerRules,
+  type TaskTemplateBranchStrategy,
+  type TaskTemplateTriggerContext,
+  type TaskTemplateTriggerRule
+} from "./task-templates.js";
 
 const prisma = new PrismaClient();
 const redis = new Redis(process.env.REDIS_URL ?? "redis://127.0.0.1:6379");
@@ -143,6 +156,16 @@ const SHELL_POD_READY_TIMEOUT_SECONDS = Number(process.env.SHELL_POD_READY_TIMEO
 const githubSyncConfig = githubSyncConfigFromEnv(process.env);
 const GITHUB_APP_GLOBAL_SECRET_NAME = process.env.GITHUB_APP_GLOBAL_SECRET_NAME ?? "github-app";
 const GITHUB_APP_MANIFEST_URL = "https://github.com/settings/apps/new";
+const TASK_TEMPLATE_SCHEDULER_ENABLED =
+  (process.env.TASK_TEMPLATE_SCHEDULER_ENABLED ?? "true").trim().toLowerCase() !== "false";
+const TASK_TEMPLATE_SCHEDULER_INTERVAL_SECONDS = Math.max(
+  5,
+  Number.parseInt(process.env.TASK_TEMPLATE_SCHEDULER_INTERVAL_SECONDS ?? "30", 10) || 30
+);
+const TASK_TEMPLATE_SCHEDULER_BATCH_SIZE = Math.max(
+  1,
+  Math.min(500, Number.parseInt(process.env.TASK_TEMPLATE_SCHEDULER_BATCH_SIZE ?? "50", 10) || 50)
+);
 const digestPinnedImagePattern = /@sha256:[a-f0-9]{64}$/i;
 const imageTagPattern = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
 const environmentResourcesSchema = z.object({
@@ -844,6 +867,104 @@ async function propagateGlobalAttractorToAllProjects(attractor: {
   }
 }
 
+type GlobalTaskTemplateInput = {
+  name: string;
+  attractorName: string;
+  runType: RunType;
+  sourceBranch: string | null;
+  targetBranch: string | null;
+  environmentMode: TaskTemplateEnvironmentMode;
+  environmentName: string | null;
+  scheduleEnabled: boolean;
+  scheduleCron: string | null;
+  scheduleTimezone: string | null;
+  triggersJson: unknown | null;
+  description: string | null;
+  active: boolean;
+};
+
+async function upsertGlobalTaskTemplateForProject(
+  projectId: string,
+  template: GlobalTaskTemplateInput
+): Promise<void> {
+  const schedule = normalizeTemplateScheduleInput({
+    scheduleEnabled: template.scheduleEnabled,
+    scheduleCron: template.scheduleCron,
+    scheduleTimezone: template.scheduleTimezone
+  });
+
+  await prisma.taskTemplate.upsert({
+    where: {
+      projectId_name_scope: {
+        projectId,
+        name: template.name,
+        scope: AttractorScope.GLOBAL
+      }
+    },
+    update: {
+      attractorName: template.attractorName,
+      runType: template.runType,
+      sourceBranch: template.sourceBranch,
+      targetBranch: template.targetBranch,
+      environmentMode: template.environmentMode,
+      environmentName: template.environmentName,
+      scheduleEnabled: template.scheduleEnabled,
+      scheduleCron: schedule.scheduleCron,
+      scheduleTimezone: schedule.scheduleTimezone,
+      scheduleNextRunAt: schedule.scheduleNextRunAt,
+      triggersJson: template.triggersJson as never,
+      description: template.description,
+      active: template.active
+    },
+    create: {
+      projectId,
+      scope: AttractorScope.GLOBAL,
+      name: template.name,
+      attractorName: template.attractorName,
+      runType: template.runType,
+      sourceBranch: template.sourceBranch,
+      targetBranch: template.targetBranch,
+      environmentMode: template.environmentMode,
+      environmentName: template.environmentName,
+      scheduleEnabled: template.scheduleEnabled,
+      scheduleCron: schedule.scheduleCron,
+      scheduleTimezone: schedule.scheduleTimezone,
+      scheduleNextRunAt: schedule.scheduleNextRunAt,
+      triggersJson: template.triggersJson as never,
+      description: template.description,
+      active: template.active
+    }
+  });
+}
+
+async function syncGlobalTaskTemplatesToProject(projectId: string): Promise<void> {
+  const globals = await prisma.globalTaskTemplate.findMany();
+  for (const template of globals) {
+    await upsertGlobalTaskTemplateForProject(projectId, {
+      name: template.name,
+      attractorName: template.attractorName,
+      runType: template.runType,
+      sourceBranch: template.sourceBranch,
+      targetBranch: template.targetBranch,
+      environmentMode: template.environmentMode,
+      environmentName: template.environmentName,
+      scheduleEnabled: template.scheduleEnabled,
+      scheduleCron: template.scheduleCron,
+      scheduleTimezone: template.scheduleTimezone,
+      triggersJson: template.triggersJson,
+      description: template.description,
+      active: template.active
+    });
+  }
+}
+
+async function propagateGlobalTaskTemplateToAllProjects(template: GlobalTaskTemplateInput): Promise<void> {
+  const projects = await prisma.project.findMany({ select: { id: true } });
+  for (const project of projects) {
+    await upsertGlobalTaskTemplateForProject(project.id, template);
+  }
+}
+
 async function hasEffectiveProviderSecret(projectId: string, provider: string): Promise<boolean> {
   const [projectSecret, globalSecret] = await Promise.all([
     prisma.projectSecret.findFirst({
@@ -860,6 +981,325 @@ async function hasEffectiveProviderSecret(projectId: string, provider: string): 
   ]);
 
   return !!projectSecret || !!globalSecret;
+}
+
+function selectEffectiveRowsByName<T extends { name: string; scope: AttractorScope }>(rows: T[]): T[] {
+  const projectByName = new Set(
+    rows.filter((row) => row.scope === AttractorScope.PROJECT).map((row) => row.name)
+  );
+  return rows.filter((row) => {
+    if (row.scope === AttractorScope.PROJECT) {
+      return true;
+    }
+    return !projectByName.has(row.name);
+  });
+}
+
+function buildTaskTemplateRows<T extends { id: string; name: string; scope: AttractorScope; active: boolean }>(
+  templates: T[]
+) {
+  const projectByName = new Set(
+    templates
+      .filter((template) => template.scope === AttractorScope.PROJECT)
+      .map((template) => template.name)
+  );
+  return templates.map((template) => ({
+    id: template.id,
+    name: template.name,
+    scope: template.scope,
+    active: template.active,
+    status:
+      template.scope === AttractorScope.PROJECT
+        ? "Project"
+        : projectByName.has(template.name)
+          ? "Overridden"
+          : "Inherited"
+  }));
+}
+
+function parseTemplateTriggersOrThrow(triggersJson: unknown): TaskTemplateTriggerRule[] {
+  const parsed = parseTaskTemplateTriggerRules(triggersJson);
+  if (parsed.errors.length > 0) {
+    throw new Error(parsed.errors.join("; "));
+  }
+  return parsed.rules;
+}
+
+function normalizeTemplateScheduleInput(input: {
+  scheduleEnabled: boolean;
+  scheduleCron: string | null;
+  scheduleTimezone: string | null;
+  from?: Date;
+}): { scheduleCron: string | null; scheduleTimezone: string | null; scheduleNextRunAt: Date | null } {
+  const timezone = (input.scheduleTimezone ?? "").trim() || "UTC";
+  const cron = (input.scheduleCron ?? "").trim() || null;
+  if (!input.scheduleEnabled) {
+    return {
+      scheduleCron: cron,
+      scheduleTimezone: timezone,
+      scheduleNextRunAt: null
+    };
+  }
+  if (!cron) {
+    throw new Error("scheduleCron is required when scheduleEnabled=true");
+  }
+  if (!isValidIanaTimeZone(timezone)) {
+    throw new Error(`invalid scheduleTimezone: ${timezone}`);
+  }
+  const scheduleNextRunAt = nextCronDate({
+    cron,
+    timeZone: timezone,
+    from: input.from ?? new Date()
+  });
+  return {
+    scheduleCron: cron,
+    scheduleTimezone: timezone,
+    scheduleNextRunAt
+  };
+}
+
+async function resolveTemplateEnvironmentId(input: {
+  projectId: string;
+  environmentMode: TaskTemplateEnvironmentMode;
+  environmentName: string | null;
+}): Promise<string | undefined> {
+  if (input.environmentMode === TaskTemplateEnvironmentMode.PROJECT_DEFAULT) {
+    return undefined;
+  }
+  const environmentName = (input.environmentName ?? "").trim();
+  if (!environmentName) {
+    throw new Error("environmentName is required when environmentMode=NAMED");
+  }
+  const environment = await prisma.environment.findUnique({
+    where: { name: environmentName }
+  });
+  if (!environment) {
+    throw new Error(`environment ${environmentName} not found`);
+  }
+  if (!environment.active) {
+    throw new Error(`environment ${environmentName} is inactive`);
+  }
+  return environment.id;
+}
+
+async function resolveEffectiveAttractorByName(projectId: string, name: string) {
+  const projectAttractor = await prisma.attractorDef.findUnique({
+    where: {
+      projectId_name_scope: {
+        projectId,
+        name,
+        scope: AttractorScope.PROJECT
+      }
+    }
+  });
+  if (projectAttractor) {
+    return projectAttractor;
+  }
+
+  return prisma.attractorDef.findUnique({
+    where: {
+      projectId_name_scope: {
+        projectId,
+        name,
+        scope: AttractorScope.GLOBAL
+      }
+    }
+  });
+}
+
+type QueueTaskTemplateRunInput = {
+  projectId: string;
+  taskTemplateId: string;
+  taskTemplateName: string;
+  attractorName: string;
+  runType: RunType;
+  sourceBranch: string | null;
+  targetBranch: string | null;
+  environmentMode: TaskTemplateEnvironmentMode;
+  environmentName: string | null;
+  launchMode: TaskTemplateLaunchMode;
+  githubIssueId?: string | null;
+  githubPullRequestId?: string | null;
+  triggerContext?: TaskTemplateTriggerContext | null;
+  matchedRuleIds?: string[] | null;
+  force?: boolean;
+  specBundleId?: string | null;
+};
+
+async function queueRunFromTaskTemplate(input: QueueTaskTemplateRunInput): Promise<{
+  runId: string;
+  status: RunStatus;
+}> {
+  const project = await prisma.project.findUnique({ where: { id: input.projectId } });
+  if (!project) {
+    throw new Error("project not found");
+  }
+
+  const attractorDef = await resolveEffectiveAttractorByName(input.projectId, input.attractorName);
+  if (!attractorDef) {
+    throw new Error(`attractor ${input.attractorName} not found in project`);
+  }
+  if (!attractorDef.active) {
+    throw new Error(`attractor ${input.attractorName} is inactive`);
+  }
+
+  const modelConfig = requireAttractorModelConfig({
+    modelConfig: attractorDef.modelConfig,
+    attractorName: attractorDef.name
+  });
+  const providerSecretExists = await hasEffectiveProviderSecret(project.id, modelConfig.provider);
+  if (!providerSecretExists) {
+    throw new Error(
+      `Missing provider secret for ${modelConfig.provider}. Configure it in Project Secret or Global Secret UI first.`
+    );
+  }
+
+  const attractorSnapshot = await resolveAttractorSnapshotForRun({
+    id: attractorDef.id,
+    name: attractorDef.name,
+    scope: attractorDef.scope,
+    contentPath: attractorDef.contentPath,
+    contentVersion: attractorDef.contentVersion
+  });
+
+  let resolvedSpecBundleId = input.specBundleId ?? null;
+  let dotImplementationWithoutSpecBundle = false;
+
+  if (input.runType === RunType.planning && resolvedSpecBundleId) {
+    throw new Error("planning runs must not set specBundleId");
+  }
+  if (input.runType === RunType.task && resolvedSpecBundleId) {
+    throw new Error("task runs must not set specBundleId");
+  }
+
+  if (input.runType === RunType.implementation && !resolvedSpecBundleId) {
+    dotImplementationWithoutSpecBundle = await attractorSupportsDotImplementation({
+      contentPath: attractorDef.contentPath
+    });
+    if (!dotImplementationWithoutSpecBundle) {
+      const latestPlanningRun = await prisma.run.findFirst({
+        where: {
+          projectId: project.id,
+          runType: RunType.planning,
+          status: RunStatus.SUCCEEDED,
+          specBundleId: { not: null }
+        },
+        orderBy: { finishedAt: "desc" }
+      });
+      if (!latestPlanningRun?.specBundleId) {
+        throw new Error("no successful planning run with a spec bundle is available");
+      }
+      resolvedSpecBundleId = latestPlanningRun.specBundleId;
+    }
+  }
+
+  if (input.runType === RunType.implementation && !input.force) {
+    const normalizedTargetBranch =
+      (input.targetBranch ?? "").trim() || (input.sourceBranch ?? "").trim() || project.defaultBranch || "main";
+    const collision = await prisma.run.findFirst({
+      where: {
+        projectId: project.id,
+        runType: RunType.implementation,
+        targetBranch: normalizedTargetBranch,
+        status: { in: [RunStatus.QUEUED, RunStatus.RUNNING] }
+      }
+    });
+    if (collision) {
+      throw new Error(`Branch collision: run ${collision.id} is already active on ${normalizedTargetBranch}`);
+    }
+  }
+
+  const sourceBranch = (input.sourceBranch ?? "").trim() || project.defaultBranch || "main";
+  const targetBranch =
+    input.runType === RunType.task
+      ? sourceBranch
+      : (input.targetBranch ?? "").trim() || sourceBranch;
+
+  const explicitEnvironmentId = await resolveTemplateEnvironmentId({
+    projectId: project.id,
+    environmentMode: input.environmentMode,
+    environmentName: input.environmentName
+  });
+  const resolvedEnvironment = await resolveRunEnvironment({
+    projectId: project.id,
+    explicitEnvironmentId
+  });
+
+  const run = await prisma.run.create({
+    data: {
+      projectId: project.id,
+      attractorDefId: attractorDef.id,
+      taskTemplateId: input.taskTemplateId,
+      taskTemplateLaunchMode: input.launchMode,
+      attractorContentPath: attractorSnapshot.contentPath,
+      attractorContentVersion: attractorSnapshot.contentVersion,
+      attractorContentSha256: attractorSnapshot.contentSha256,
+      githubIssueId: input.githubIssueId ?? null,
+      githubPullRequestId: input.githubPullRequestId ?? null,
+      environmentId: resolvedEnvironment.id,
+      environmentSnapshot: resolvedEnvironment.snapshot as never,
+      runType: input.runType,
+      sourceBranch,
+      targetBranch,
+      status: RunStatus.QUEUED,
+      specBundleId: resolvedSpecBundleId
+    }
+  });
+
+  await appendRunEvent(run.id, "RunQueued", {
+    runId: run.id,
+    runType: run.runType,
+    projectId: run.projectId,
+    targetBranch: run.targetBranch,
+    dotImplementationWithoutSpecBundle,
+    attractorSnapshot,
+    modelConfig,
+    environment: resolvedEnvironment.snapshot,
+    runnerImage: resolvedEnvironment.snapshot.runnerImage,
+    taskTemplate: {
+      id: input.taskTemplateId,
+      name: input.taskTemplateName,
+      launchMode: input.launchMode
+    }
+  });
+  await appendRunEvent(run.id, "TaskTemplateTriggered", {
+    runId: run.id,
+    taskTemplateId: input.taskTemplateId,
+    taskTemplateName: input.taskTemplateName,
+    launchMode: input.launchMode,
+    matchedRuleIds: input.matchedRuleIds ?? [],
+    trigger: input.triggerContext ?? null
+  });
+  if (input.launchMode === TaskTemplateLaunchMode.EVENT) {
+    await appendRunEvent(run.id, "TaskTemplateMatched", {
+      runId: run.id,
+      taskTemplateId: input.taskTemplateId,
+      taskTemplateName: input.taskTemplateName,
+      matchedRuleIds: input.matchedRuleIds ?? [],
+      trigger: input.triggerContext ?? null
+    });
+  }
+  if (input.launchMode === TaskTemplateLaunchMode.SCHEDULE) {
+    await appendRunEvent(run.id, "TaskTemplateScheduleDue", {
+      runId: run.id,
+      taskTemplateId: input.taskTemplateId,
+      taskTemplateName: input.taskTemplateName
+    });
+  }
+  if (input.launchMode === TaskTemplateLaunchMode.REPLAY) {
+    await appendRunEvent(run.id, "TaskTemplateReplayTriggered", {
+      runId: run.id,
+      taskTemplateId: input.taskTemplateId,
+      taskTemplateName: input.taskTemplateName,
+      trigger: input.triggerContext ?? null
+    });
+  }
+
+  await redis.lpush(runQueueKey(), run.id);
+  return {
+    runId: run.id,
+    status: run.status
+  };
 }
 
 function waitMs(ms: number): Promise<void> {
@@ -1444,6 +1884,138 @@ async function upsertGitHubPullRequestForProject(input: {
   });
 }
 
+async function triggerTaskTemplatesForEvent(input: {
+  project: { id: string; defaultBranch: string | null };
+  deliveryId: string | null;
+  context: TaskTemplateTriggerContext;
+  githubIssueId?: string | null;
+  githubPullRequestId?: string | null;
+}): Promise<void> {
+  const allTemplates = await prisma.taskTemplate.findMany({
+    where: {
+      projectId: input.project.id
+    },
+    orderBy: [{ createdAt: "desc" }]
+  });
+  const templates = selectEffectiveRowsByName(allTemplates).filter((template) => template.active);
+  for (const template of templates) {
+    const { rules, errors } = parseTaskTemplateTriggerRules(template.triggersJson);
+    if (errors.length > 0) {
+      process.stderr.write(
+        `task template ${template.id} trigger parse errors: ${errors.join("; ")}\n`
+      );
+      continue;
+    }
+    const matchedRules = rules.filter((rule) => matchesTriggerRule(rule, input.context));
+    if (matchedRules.length === 0) {
+      continue;
+    }
+
+    const dedupeKey = canonicalDedupeKey(input.context);
+    const selectedRule = matchedRules[0];
+
+    let ledger;
+    try {
+      ledger = await prisma.taskTemplateEventLedger.create({
+        data: {
+          projectId: input.project.id,
+          taskTemplateId: template.id,
+          eventName: input.context.event,
+          eventAction: input.context.action ?? null,
+          dedupeKey,
+          deliveryId: input.deliveryId,
+          entityType: input.context.issue
+            ? "issue"
+            : input.context.pullRequest
+              ? "pull_request"
+              : null,
+          entityNumber: input.context.issue?.number ?? input.context.pullRequest?.number ?? null,
+          matchedRuleIds: matchedRules.map((rule) => rule.id) as never,
+          payload: {
+            triggerContext: input.context,
+            githubIssueId: input.githubIssueId ?? null,
+            githubPullRequestId: input.githubPullRequestId ?? null
+          } as never,
+          status: "MATCHED"
+        }
+      });
+    } catch (error) {
+      if ((error as { code?: string })?.code === "P2002") {
+        continue;
+      }
+      throw error;
+    }
+
+    let sourceBranch = template.sourceBranch;
+    let targetBranch = template.targetBranch;
+
+    if (selectedRule.branchStrategy === "ISSUE_BRANCH") {
+      if (!input.context.issue) {
+        await prisma.taskTemplateEventLedger.update({
+          where: { id: ledger.id },
+          data: {
+            status: "SKIPPED",
+            reason: "ISSUE_BRANCH strategy selected but issue context was unavailable"
+          }
+        });
+        continue;
+      }
+      sourceBranch = input.project.defaultBranch ?? "main";
+      targetBranch = issueTargetBranch(input.context.issue.number, input.context.issue.title);
+    }
+
+    if (selectedRule.branchStrategy === "PR_HEAD") {
+      if (!input.context.pullRequest) {
+        await prisma.taskTemplateEventLedger.update({
+          where: { id: ledger.id },
+          data: {
+            status: "SKIPPED",
+            reason: "PR_HEAD strategy selected but pull request context was unavailable"
+          }
+        });
+        continue;
+      }
+      sourceBranch = input.context.pullRequest.baseRefName || input.project.defaultBranch || "main";
+      targetBranch = input.context.pullRequest.headRefName || sourceBranch;
+    }
+
+    try {
+      const queued = await queueRunFromTaskTemplate({
+        projectId: input.project.id,
+        taskTemplateId: template.id,
+        taskTemplateName: template.name,
+        attractorName: template.attractorName,
+        runType: template.runType,
+        sourceBranch,
+        targetBranch,
+        environmentMode: template.environmentMode,
+        environmentName: template.environmentName,
+        launchMode: TaskTemplateLaunchMode.EVENT,
+        githubIssueId: input.githubIssueId ?? null,
+        githubPullRequestId: input.githubPullRequestId ?? null,
+        triggerContext: input.context,
+        matchedRuleIds: matchedRules.map((rule) => rule.id)
+      });
+
+      await prisma.taskTemplateEventLedger.update({
+        where: { id: ledger.id },
+        data: {
+          runId: queued.runId,
+          status: "TRIGGERED"
+        }
+      });
+    } catch (error) {
+      await prisma.taskTemplateEventLedger.update({
+        where: { id: ledger.id },
+        data: {
+          status: "FAILED",
+          reason: error instanceof Error ? error.message : String(error)
+        }
+      });
+    }
+  }
+}
+
 async function getInstallationOctokit(installationId: string) {
   const app = await githubApp();
   if (!app) {
@@ -2004,6 +2576,7 @@ async function createProjectRecord(input: {
   });
   await syncGlobalSecretsToNamespace(namespace);
   await syncGlobalAttractorsToProject(project.id);
+  await syncGlobalTaskTemplatesToProject(project.id);
   return project;
 }
 
@@ -2138,6 +2711,7 @@ app.post("/api/bootstrap/self", async (req, res) => {
 
   await syncGlobalSecretsToNamespace(namespace);
   await syncGlobalAttractorsToProject(effectiveProject.id);
+  await syncGlobalTaskTemplatesToProject(effectiveProject.id);
 
   let bootstrapAttractorContent = toNullableText(input.data.attractorContent);
   if (!bootstrapAttractorContent) {
@@ -3199,6 +3773,551 @@ app.patch("/api/projects/:projectId/attractors/:attractorId", async (req, res) =
   });
 });
 
+const createTaskTemplateSchema = z.object({
+  name: z.string().min(1),
+  attractorName: z.string().min(1),
+  runType: z.enum(["planning", "implementation", "task"]),
+  sourceBranch: z.string().optional(),
+  targetBranch: z.string().optional(),
+  environmentMode: z.enum(["PROJECT_DEFAULT", "NAMED"]).default("PROJECT_DEFAULT"),
+  environmentName: z.string().nullable().optional(),
+  scheduleEnabled: z.boolean().default(false),
+  scheduleCron: z.string().nullable().optional(),
+  scheduleTimezone: z.string().nullable().optional(),
+  triggers: z.unknown().optional(),
+  description: z.string().nullable().optional(),
+  active: z.boolean().optional()
+});
+
+const patchTaskTemplateSchema = z
+  .object({
+    name: z.string().min(1).optional(),
+    attractorName: z.string().min(1).optional(),
+    runType: z.enum(["planning", "implementation", "task"]).optional(),
+    sourceBranch: z.string().nullable().optional(),
+    targetBranch: z.string().nullable().optional(),
+    environmentMode: z.enum(["PROJECT_DEFAULT", "NAMED"]).optional(),
+    environmentName: z.string().nullable().optional(),
+    scheduleEnabled: z.boolean().optional(),
+    scheduleCron: z.string().nullable().optional(),
+    scheduleTimezone: z.string().nullable().optional(),
+    triggers: z.unknown().optional(),
+    description: z.string().nullable().optional(),
+    active: z.boolean().optional()
+  })
+  .refine((value) => Object.keys(value).length > 0, { message: "at least one field is required" });
+
+function normalizeTemplateText(value: string | null | undefined): string | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+app.post("/api/task-templates/global", async (req, res) => {
+  const input = createTaskTemplateSchema.safeParse(req.body);
+  if (!input.success) {
+    return sendError(res, 400, input.error.message);
+  }
+
+  let parsedRules: TaskTemplateTriggerRule[];
+  try {
+    parsedRules = parseTemplateTriggersOrThrow(input.data.triggers ?? []);
+  } catch (error) {
+    return sendError(res, 400, error instanceof Error ? error.message : String(error));
+  }
+
+  let schedule;
+  try {
+    schedule = normalizeTemplateScheduleInput({
+      scheduleEnabled: input.data.scheduleEnabled,
+      scheduleCron: normalizeTemplateText(input.data.scheduleCron),
+      scheduleTimezone: normalizeTemplateText(input.data.scheduleTimezone)
+    });
+  } catch (error) {
+    return sendError(res, 400, error instanceof Error ? error.message : String(error));
+  }
+
+  const saved = await prisma.globalTaskTemplate.upsert({
+    where: { name: input.data.name },
+    update: {
+      attractorName: input.data.attractorName,
+      runType: input.data.runType,
+      sourceBranch: normalizeTemplateText(input.data.sourceBranch),
+      targetBranch: normalizeTemplateText(input.data.targetBranch),
+      environmentMode: input.data.environmentMode,
+      environmentName: normalizeTemplateText(input.data.environmentName),
+      scheduleEnabled: input.data.scheduleEnabled,
+      scheduleCron: schedule.scheduleCron,
+      scheduleTimezone: schedule.scheduleTimezone,
+      triggersJson: parsedRules as never,
+      description: normalizeTemplateText(input.data.description),
+      ...(input.data.active !== undefined ? { active: input.data.active } : {})
+    },
+    create: {
+      name: input.data.name,
+      attractorName: input.data.attractorName,
+      runType: input.data.runType,
+      sourceBranch: normalizeTemplateText(input.data.sourceBranch),
+      targetBranch: normalizeTemplateText(input.data.targetBranch),
+      environmentMode: input.data.environmentMode,
+      environmentName: normalizeTemplateText(input.data.environmentName),
+      scheduleEnabled: input.data.scheduleEnabled,
+      scheduleCron: schedule.scheduleCron,
+      scheduleTimezone: schedule.scheduleTimezone,
+      triggersJson: parsedRules as never,
+      description: normalizeTemplateText(input.data.description),
+      active: input.data.active ?? true
+    }
+  });
+
+  await propagateGlobalTaskTemplateToAllProjects({
+    name: saved.name,
+    attractorName: saved.attractorName,
+    runType: saved.runType,
+    sourceBranch: saved.sourceBranch,
+    targetBranch: saved.targetBranch,
+    environmentMode: saved.environmentMode,
+    environmentName: saved.environmentName,
+    scheduleEnabled: saved.scheduleEnabled,
+    scheduleCron: saved.scheduleCron,
+    scheduleTimezone: saved.scheduleTimezone,
+    triggersJson: saved.triggersJson,
+    description: saved.description,
+    active: saved.active
+  });
+
+  res.status(201).json(saved);
+});
+
+app.get("/api/task-templates/global", async (_req, res) => {
+  const templates = await prisma.globalTaskTemplate.findMany({
+    orderBy: { createdAt: "desc" }
+  });
+  res.json({ templates });
+});
+
+app.get("/api/task-templates/global/:templateId", async (req, res) => {
+  const template = await prisma.globalTaskTemplate.findUnique({
+    where: { id: req.params.templateId }
+  });
+  if (!template) {
+    return sendError(res, 404, "global task template not found");
+  }
+  res.json({ template });
+});
+
+app.patch("/api/task-templates/global/:templateId", async (req, res) => {
+  const input = patchTaskTemplateSchema.safeParse(req.body);
+  if (!input.success) {
+    return sendError(res, 400, input.error.message);
+  }
+
+  const current = await prisma.globalTaskTemplate.findUnique({
+    where: { id: req.params.templateId }
+  });
+  if (!current) {
+    return sendError(res, 404, "global task template not found");
+  }
+
+  const mergedTriggers = input.data.triggers !== undefined ? input.data.triggers : current.triggersJson;
+  let parsedRules: TaskTemplateTriggerRule[];
+  try {
+    parsedRules = parseTemplateTriggersOrThrow(mergedTriggers ?? []);
+  } catch (error) {
+    return sendError(res, 400, error instanceof Error ? error.message : String(error));
+  }
+
+  let schedule;
+  try {
+    schedule = normalizeTemplateScheduleInput({
+      scheduleEnabled: input.data.scheduleEnabled ?? current.scheduleEnabled,
+      scheduleCron:
+        input.data.scheduleCron !== undefined
+          ? normalizeTemplateText(input.data.scheduleCron)
+          : current.scheduleCron,
+      scheduleTimezone:
+        input.data.scheduleTimezone !== undefined
+          ? normalizeTemplateText(input.data.scheduleTimezone)
+          : current.scheduleTimezone
+    });
+  } catch (error) {
+    return sendError(res, 400, error instanceof Error ? error.message : String(error));
+  }
+
+  const updated = await prisma.globalTaskTemplate.update({
+    where: { id: current.id },
+    data: {
+      ...(input.data.name !== undefined ? { name: input.data.name } : {}),
+      ...(input.data.attractorName !== undefined ? { attractorName: input.data.attractorName } : {}),
+      ...(input.data.runType !== undefined ? { runType: input.data.runType } : {}),
+      ...(input.data.sourceBranch !== undefined
+        ? { sourceBranch: normalizeTemplateText(input.data.sourceBranch) }
+        : {}),
+      ...(input.data.targetBranch !== undefined
+        ? { targetBranch: normalizeTemplateText(input.data.targetBranch) }
+        : {}),
+      ...(input.data.environmentMode !== undefined
+        ? { environmentMode: input.data.environmentMode }
+        : {}),
+      ...(input.data.environmentName !== undefined
+        ? { environmentName: normalizeTemplateText(input.data.environmentName) }
+        : {}),
+      ...(input.data.scheduleEnabled !== undefined
+        ? { scheduleEnabled: input.data.scheduleEnabled }
+        : {}),
+      ...(input.data.scheduleCron !== undefined || input.data.scheduleTimezone !== undefined || input.data.scheduleEnabled !== undefined
+        ? {
+            scheduleCron: schedule.scheduleCron,
+            scheduleTimezone: schedule.scheduleTimezone
+          }
+        : {}),
+      ...(input.data.triggers !== undefined ? { triggersJson: parsedRules as never } : {}),
+      ...(input.data.description !== undefined
+        ? { description: normalizeTemplateText(input.data.description) }
+        : {}),
+      ...(input.data.active !== undefined ? { active: input.data.active } : {})
+    }
+  });
+
+  await propagateGlobalTaskTemplateToAllProjects({
+    name: updated.name,
+    attractorName: updated.attractorName,
+    runType: updated.runType,
+    sourceBranch: updated.sourceBranch,
+    targetBranch: updated.targetBranch,
+    environmentMode: updated.environmentMode,
+    environmentName: updated.environmentName,
+    scheduleEnabled: updated.scheduleEnabled,
+    scheduleCron: updated.scheduleCron,
+    scheduleTimezone: updated.scheduleTimezone,
+    triggersJson: updated.triggersJson,
+    description: updated.description,
+    active: updated.active
+  });
+
+  res.json({ template: updated });
+});
+
+app.post("/api/projects/:projectId/task-templates", async (req, res) => {
+  const input = createTaskTemplateSchema.safeParse(req.body);
+  if (!input.success) {
+    return sendError(res, 400, input.error.message);
+  }
+  const project = await prisma.project.findUnique({ where: { id: req.params.projectId } });
+  if (!project) {
+    return sendError(res, 404, "project not found");
+  }
+
+  let parsedRules: TaskTemplateTriggerRule[];
+  try {
+    parsedRules = parseTemplateTriggersOrThrow(input.data.triggers ?? []);
+  } catch (error) {
+    return sendError(res, 400, error instanceof Error ? error.message : String(error));
+  }
+
+  let schedule;
+  try {
+    schedule = normalizeTemplateScheduleInput({
+      scheduleEnabled: input.data.scheduleEnabled,
+      scheduleCron: normalizeTemplateText(input.data.scheduleCron),
+      scheduleTimezone: normalizeTemplateText(input.data.scheduleTimezone)
+    });
+  } catch (error) {
+    return sendError(res, 400, error instanceof Error ? error.message : String(error));
+  }
+
+  const template = await prisma.taskTemplate.upsert({
+    where: {
+      projectId_name_scope: {
+        projectId: project.id,
+        name: input.data.name,
+        scope: AttractorScope.PROJECT
+      }
+    },
+    update: {
+      attractorName: input.data.attractorName,
+      runType: input.data.runType,
+      sourceBranch: normalizeTemplateText(input.data.sourceBranch),
+      targetBranch: normalizeTemplateText(input.data.targetBranch),
+      environmentMode: input.data.environmentMode,
+      environmentName: normalizeTemplateText(input.data.environmentName),
+      scheduleEnabled: input.data.scheduleEnabled,
+      scheduleCron: schedule.scheduleCron,
+      scheduleTimezone: schedule.scheduleTimezone,
+      scheduleNextRunAt: schedule.scheduleNextRunAt,
+      scheduleLastError: null,
+      triggersJson: parsedRules as never,
+      description: normalizeTemplateText(input.data.description),
+      ...(input.data.active !== undefined ? { active: input.data.active } : {})
+    },
+    create: {
+      projectId: project.id,
+      scope: AttractorScope.PROJECT,
+      name: input.data.name,
+      attractorName: input.data.attractorName,
+      runType: input.data.runType,
+      sourceBranch: normalizeTemplateText(input.data.sourceBranch),
+      targetBranch: normalizeTemplateText(input.data.targetBranch),
+      environmentMode: input.data.environmentMode,
+      environmentName: normalizeTemplateText(input.data.environmentName),
+      scheduleEnabled: input.data.scheduleEnabled,
+      scheduleCron: schedule.scheduleCron,
+      scheduleTimezone: schedule.scheduleTimezone,
+      scheduleNextRunAt: schedule.scheduleNextRunAt,
+      triggersJson: parsedRules as never,
+      description: normalizeTemplateText(input.data.description),
+      active: input.data.active ?? true
+    }
+  });
+
+  res.status(201).json({ template });
+});
+
+app.get("/api/projects/:projectId/task-templates", async (req, res) => {
+  const templates = await prisma.taskTemplate.findMany({
+    where: { projectId: req.params.projectId },
+    orderBy: [{ createdAt: "desc" }]
+  });
+  const rows = buildTaskTemplateRows(templates);
+  const effectiveTemplates = selectEffectiveRowsByName(templates);
+  res.json({ templates, rows, effectiveTemplates });
+});
+
+app.get("/api/projects/:projectId/task-templates/events", async (req, res) => {
+  const events = await prisma.taskTemplateEventLedger.findMany({
+    where: { projectId: req.params.projectId },
+    include: {
+      taskTemplate: {
+        select: {
+          id: true,
+          name: true,
+          scope: true
+        }
+      }
+    },
+    orderBy: { createdAt: "desc" },
+    take: 200
+  });
+  res.json({ events });
+});
+
+app.post("/api/projects/:projectId/task-templates/events/:eventId/replay", async (req, res) => {
+  const eventRecord = await prisma.taskTemplateEventLedger.findFirst({
+    where: {
+      id: req.params.eventId,
+      projectId: req.params.projectId
+    },
+    include: {
+      taskTemplate: true
+    }
+  });
+  if (!eventRecord) {
+    return sendError(res, 404, "task template event not found");
+  }
+  if (!eventRecord.taskTemplate.active) {
+    return sendError(res, 409, "task template is inactive");
+  }
+
+  const payload = (eventRecord.payload ?? {}) as Record<string, unknown>;
+  const triggerContext = (payload.triggerContext ?? null) as TaskTemplateTriggerContext | null;
+  const githubIssueId =
+    typeof payload.githubIssueId === "string" && payload.githubIssueId.trim().length > 0
+      ? payload.githubIssueId
+      : null;
+  const githubPullRequestId =
+    typeof payload.githubPullRequestId === "string" && payload.githubPullRequestId.trim().length > 0
+      ? payload.githubPullRequestId
+      : null;
+
+  try {
+    const queued = await queueRunFromTaskTemplate({
+      projectId: eventRecord.projectId,
+      taskTemplateId: eventRecord.taskTemplateId,
+      taskTemplateName: eventRecord.taskTemplate.name,
+      attractorName: eventRecord.taskTemplate.attractorName,
+      runType: eventRecord.taskTemplate.runType,
+      sourceBranch: eventRecord.taskTemplate.sourceBranch,
+      targetBranch: eventRecord.taskTemplate.targetBranch,
+      environmentMode: eventRecord.taskTemplate.environmentMode,
+      environmentName: eventRecord.taskTemplate.environmentName,
+      launchMode: TaskTemplateLaunchMode.REPLAY,
+      githubIssueId,
+      githubPullRequestId,
+      triggerContext,
+      matchedRuleIds: Array.isArray(eventRecord.matchedRuleIds)
+        ? (eventRecord.matchedRuleIds as string[])
+        : []
+    });
+
+    const replayDedupeKey = `${eventRecord.dedupeKey}:replay:${Date.now()}`;
+    await prisma.taskTemplateEventLedger.create({
+      data: {
+        projectId: eventRecord.projectId,
+        taskTemplateId: eventRecord.taskTemplateId,
+        runId: queued.runId,
+        eventName: eventRecord.eventName,
+        eventAction: eventRecord.eventAction,
+        dedupeKey: replayDedupeKey,
+        deliveryId: eventRecord.deliveryId,
+        entityType: eventRecord.entityType,
+        entityNumber: eventRecord.entityNumber,
+        matchedRuleIds: eventRecord.matchedRuleIds as never,
+        payload: eventRecord.payload as never,
+        status: "REPLAYED",
+        reason: `replay of ${eventRecord.id}`,
+        replayedAt: new Date()
+      }
+    });
+    await prisma.taskTemplateEventLedger.update({
+      where: { id: eventRecord.id },
+      data: { replayedAt: new Date() }
+    });
+
+    return res.status(201).json({ runId: queued.runId, status: queued.status });
+  } catch (error) {
+    return sendError(res, 409, error instanceof Error ? error.message : String(error));
+  }
+});
+
+app.get("/api/projects/:projectId/task-templates/:templateId", async (req, res) => {
+  const template = await prisma.taskTemplate.findFirst({
+    where: {
+      projectId: req.params.projectId,
+      id: req.params.templateId
+    }
+  });
+  if (!template) {
+    return sendError(res, 404, "task template not found");
+  }
+  res.json({ template });
+});
+
+app.patch("/api/projects/:projectId/task-templates/:templateId", async (req, res) => {
+  const input = patchTaskTemplateSchema.safeParse(req.body);
+  if (!input.success) {
+    return sendError(res, 400, input.error.message);
+  }
+
+  const current = await prisma.taskTemplate.findFirst({
+    where: {
+      projectId: req.params.projectId,
+      id: req.params.templateId
+    }
+  });
+  if (!current) {
+    return sendError(res, 404, "task template not found");
+  }
+  if (current.scope !== AttractorScope.PROJECT) {
+    return sendError(res, 409, "inherited global task templates are read-only in project scope");
+  }
+
+  const mergedTriggers = input.data.triggers !== undefined ? input.data.triggers : current.triggersJson;
+  let parsedRules: TaskTemplateTriggerRule[];
+  try {
+    parsedRules = parseTemplateTriggersOrThrow(mergedTriggers ?? []);
+  } catch (error) {
+    return sendError(res, 400, error instanceof Error ? error.message : String(error));
+  }
+
+  let schedule;
+  try {
+    schedule = normalizeTemplateScheduleInput({
+      scheduleEnabled: input.data.scheduleEnabled ?? current.scheduleEnabled,
+      scheduleCron:
+        input.data.scheduleCron !== undefined
+          ? normalizeTemplateText(input.data.scheduleCron)
+          : current.scheduleCron,
+      scheduleTimezone:
+        input.data.scheduleTimezone !== undefined
+          ? normalizeTemplateText(input.data.scheduleTimezone)
+          : current.scheduleTimezone
+    });
+  } catch (error) {
+    return sendError(res, 400, error instanceof Error ? error.message : String(error));
+  }
+
+  const template = await prisma.taskTemplate.update({
+    where: { id: current.id },
+    data: {
+      ...(input.data.name !== undefined ? { name: input.data.name } : {}),
+      ...(input.data.attractorName !== undefined ? { attractorName: input.data.attractorName } : {}),
+      ...(input.data.runType !== undefined ? { runType: input.data.runType } : {}),
+      ...(input.data.sourceBranch !== undefined
+        ? { sourceBranch: normalizeTemplateText(input.data.sourceBranch) }
+        : {}),
+      ...(input.data.targetBranch !== undefined
+        ? { targetBranch: normalizeTemplateText(input.data.targetBranch) }
+        : {}),
+      ...(input.data.environmentMode !== undefined
+        ? { environmentMode: input.data.environmentMode }
+        : {}),
+      ...(input.data.environmentName !== undefined
+        ? { environmentName: normalizeTemplateText(input.data.environmentName) }
+        : {}),
+      ...(input.data.scheduleEnabled !== undefined
+        ? { scheduleEnabled: input.data.scheduleEnabled }
+        : {}),
+      ...(input.data.scheduleCron !== undefined || input.data.scheduleTimezone !== undefined || input.data.scheduleEnabled !== undefined
+        ? {
+            scheduleCron: schedule.scheduleCron,
+            scheduleTimezone: schedule.scheduleTimezone,
+            scheduleNextRunAt: schedule.scheduleNextRunAt
+          }
+        : {}),
+      ...(input.data.triggers !== undefined ? { triggersJson: parsedRules as never } : {}),
+      ...(input.data.description !== undefined
+        ? { description: normalizeTemplateText(input.data.description) }
+        : {}),
+      ...(input.data.active !== undefined ? { active: input.data.active } : {})
+    }
+  });
+
+  res.json({ template });
+});
+
+app.post("/api/projects/:projectId/task-templates/:templateId/runs", async (req, res) => {
+  const force = req.body && typeof req.body.force === "boolean" ? req.body.force : false;
+  const specBundleId =
+    req.body && typeof req.body.specBundleId === "string" && req.body.specBundleId.trim().length > 0
+      ? req.body.specBundleId.trim()
+      : null;
+
+  const template = await prisma.taskTemplate.findFirst({
+    where: {
+      projectId: req.params.projectId,
+      id: req.params.templateId
+    }
+  });
+  if (!template) {
+    return sendError(res, 404, "task template not found");
+  }
+  if (!template.active) {
+    return sendError(res, 409, "task template is inactive");
+  }
+
+  try {
+    const queued = await queueRunFromTaskTemplate({
+      projectId: template.projectId,
+      taskTemplateId: template.id,
+      taskTemplateName: template.name,
+      attractorName: template.attractorName,
+      runType: template.runType,
+      sourceBranch: template.sourceBranch,
+      targetBranch: template.targetBranch,
+      environmentMode: template.environmentMode,
+      environmentName: template.environmentName,
+      launchMode: TaskTemplateLaunchMode.MANUAL,
+      force,
+      specBundleId
+    });
+    return res.status(201).json(queued);
+  } catch (error) {
+    return sendError(res, 409, error instanceof Error ? error.message : String(error));
+  }
+});
+
 app.get("/api/projects/:projectId/runs", async (req, res) => {
   const runs = await prisma.run.findMany({
     where: { projectId: req.params.projectId },
@@ -4158,7 +5277,33 @@ app.post("/api/github/webhooks", express.raw({ type: "*/*" }), async (req, res) 
   }
 
   const action = String(payload.action ?? "");
-  if (eventName === "issues" && ["opened", "edited", "reopened", "closed"].includes(action)) {
+  let issueRecord:
+    | {
+        id: string;
+        issueNumber: number;
+        title: string;
+        state: string;
+        labelsJson: unknown | null;
+        updatedAt: Date;
+      }
+    | null = null;
+  let pullRecord:
+    | {
+        id: string;
+        prNumber: number;
+        title: string;
+        state: string;
+        headRefName: string;
+        headSha: string;
+        baseRefName: string;
+        mergedAt: Date | null;
+        updatedAt: Date;
+        linkedIssueId: string | null;
+      }
+    | null = null;
+  let triggerContext: TaskTemplateTriggerContext | null = null;
+
+  if (eventName === "issues" && ["opened", "edited", "reopened", "closed", "labeled"].includes(action)) {
     const issue = payload.issue as {
       number: number;
       state: string;
@@ -4173,10 +5318,57 @@ app.post("/api/github/webhooks", express.raw({ type: "*/*" }), async (req, res) 
       updated_at: string;
     } | undefined;
     if (issue) {
-      await upsertGitHubIssueForProject({
+      issueRecord = await upsertGitHubIssueForProject({
         projectId: project.id,
         issue
       });
+
+      const labels = Array.isArray(issueRecord.labelsJson)
+        ? (issueRecord.labelsJson as string[])
+        : normalizeIssueLabels(issue.labels);
+
+      if (action === "opened") {
+        triggerContext = {
+          event: "GITHUB_ISSUE_OPENED",
+          action,
+          issue: {
+            number: issueRecord.issueNumber,
+            title: issueRecord.title,
+            state: issueRecord.state,
+            labels,
+            updatedAt: issueRecord.updatedAt.toISOString()
+          }
+        };
+      } else if (action === "reopened") {
+        triggerContext = {
+          event: "GITHUB_ISSUE_REOPENED",
+          action,
+          issue: {
+            number: issueRecord.issueNumber,
+            title: issueRecord.title,
+            state: issueRecord.state,
+            labels,
+            updatedAt: issueRecord.updatedAt.toISOString()
+          }
+        };
+      } else if (action === "labeled") {
+        const labeledName =
+          typeof (payload.label as { name?: unknown } | undefined)?.name === "string"
+            ? ((payload.label as { name?: string }).name ?? "").trim()
+            : "";
+        triggerContext = {
+          event: "GITHUB_ISSUE_LABELED",
+          action,
+          issue: {
+            number: issueRecord.issueNumber,
+            title: issueRecord.title,
+            state: issueRecord.state,
+            labels,
+            updatedAt: issueRecord.updatedAt.toISOString()
+          },
+          labeledName
+        };
+      }
     }
   }
 
@@ -4195,10 +5387,213 @@ app.post("/api/github/webhooks", express.raw({ type: "*/*" }), async (req, res) 
       updated_at: string;
     } | undefined;
     if (pullRequest) {
-      await upsertGitHubPullRequestForProject({
+      pullRecord = await upsertGitHubPullRequestForProject({
         projectId: project.id,
         pullRequest
       });
+
+      if (action === "opened") {
+        triggerContext = {
+          event: "GITHUB_PR_OPENED",
+          action,
+          pullRequest: {
+            number: pullRecord.prNumber,
+            state: pullRecord.state,
+            title: pullRecord.title,
+            headRefName: pullRecord.headRefName,
+            headSha: pullRecord.headSha,
+            baseRefName: pullRecord.baseRefName,
+            mergedAt: pullRecord.mergedAt?.toISOString() ?? null,
+            updatedAt: pullRecord.updatedAt.toISOString()
+          }
+        };
+      } else if (action === "synchronize") {
+        triggerContext = {
+          event: "GITHUB_PR_SYNCHRONIZE",
+          action,
+          pullRequest: {
+            number: pullRecord.prNumber,
+            state: pullRecord.state,
+            title: pullRecord.title,
+            headRefName: pullRecord.headRefName,
+            headSha: pullRecord.headSha,
+            baseRefName: pullRecord.baseRefName,
+            mergedAt: pullRecord.mergedAt?.toISOString() ?? null,
+            updatedAt: pullRecord.updatedAt.toISOString()
+          }
+        };
+      } else if (action === "closed" && pullRecord.mergedAt) {
+        triggerContext = {
+          event: "GITHUB_PR_MERGED",
+          action,
+          pullRequest: {
+            number: pullRecord.prNumber,
+            state: pullRecord.state,
+            title: pullRecord.title,
+            headRefName: pullRecord.headRefName,
+            headSha: pullRecord.headSha,
+            baseRefName: pullRecord.baseRefName,
+            mergedAt: pullRecord.mergedAt.toISOString(),
+            updatedAt: pullRecord.updatedAt.toISOString()
+          }
+        };
+      }
+    }
+  }
+
+  if (eventName === "issue_comment" && action === "created") {
+    const issue = payload.issue as {
+      number: number;
+      state: string;
+      title: string;
+      body?: string | null;
+      user?: { login?: string | null } | null;
+      labels?: Array<string | { name?: string | null } | null> | null;
+      assignees?: Array<{ login?: string | null } | null> | null;
+      html_url: string;
+      created_at: string;
+      closed_at?: string | null;
+      updated_at: string;
+    } | undefined;
+    const comment = payload.comment as {
+      id: number;
+      body?: string | null;
+      user?: { login?: string | null; type?: string | null } | null;
+    } | undefined;
+    if (issue && comment) {
+      issueRecord = await upsertGitHubIssueForProject({
+        projectId: project.id,
+        issue
+      });
+      const authorLogin = comment.user?.login ?? null;
+      const authorType = comment.user?.type ?? null;
+      if (isHumanActor(authorType, authorLogin)) {
+        const labels = Array.isArray(issueRecord.labelsJson)
+          ? (issueRecord.labelsJson as string[])
+          : normalizeIssueLabels(issue.labels);
+        triggerContext = {
+          event: "GITHUB_ISSUE_COMMENT_CREATED",
+          action,
+          issue: {
+            number: issueRecord.issueNumber,
+            title: issueRecord.title,
+            state: issueRecord.state,
+            labels,
+            updatedAt: issueRecord.updatedAt.toISOString()
+          },
+          comment: {
+            id: comment.id,
+            body: comment.body ?? "",
+            authorLogin,
+            authorType
+          }
+        };
+      }
+    }
+  }
+
+  if (eventName === "pull_request_review" && action === "submitted") {
+    const pullRequest = payload.pull_request as {
+      number: number;
+      state: string;
+      title: string;
+      body?: string | null;
+      html_url: string;
+      head: { ref: string; sha: string };
+      base: { ref: string };
+      created_at: string;
+      closed_at?: string | null;
+      merged_at?: string | null;
+      updated_at: string;
+    } | undefined;
+    const review = payload.review as {
+      id: number;
+      state?: string | null;
+      body?: string | null;
+      user?: { login?: string | null; type?: string | null } | null;
+    } | undefined;
+    if (pullRequest && review) {
+      pullRecord = await upsertGitHubPullRequestForProject({
+        projectId: project.id,
+        pullRequest
+      });
+      const reviewState = (review.state ?? "").toLowerCase();
+      const authorLogin = review.user?.login ?? null;
+      const authorType = review.user?.type ?? null;
+      if (reviewState === "changes_requested" && isHumanActor(authorType, authorLogin)) {
+        triggerContext = {
+          event: "GITHUB_PR_REVIEW_CHANGES_REQUESTED",
+          action,
+          pullRequest: {
+            number: pullRecord.prNumber,
+            state: pullRecord.state,
+            title: pullRecord.title,
+            headRefName: pullRecord.headRefName,
+            headSha: pullRecord.headSha,
+            baseRefName: pullRecord.baseRefName,
+            mergedAt: pullRecord.mergedAt?.toISOString() ?? null,
+            updatedAt: pullRecord.updatedAt.toISOString()
+          },
+          review: {
+            id: review.id,
+            body: review.body ?? "",
+            state: reviewState,
+            authorLogin,
+            authorType
+          }
+        };
+      }
+    }
+  }
+
+  if (eventName === "pull_request_review_comment" && action === "created") {
+    const pullRequest = payload.pull_request as {
+      number: number;
+      state: string;
+      title: string;
+      body?: string | null;
+      html_url: string;
+      head: { ref: string; sha: string };
+      base: { ref: string };
+      created_at: string;
+      closed_at?: string | null;
+      merged_at?: string | null;
+      updated_at: string;
+    } | undefined;
+    const comment = payload.comment as {
+      id: number;
+      body?: string | null;
+      user?: { login?: string | null; type?: string | null } | null;
+    } | undefined;
+    if (pullRequest && comment) {
+      pullRecord = await upsertGitHubPullRequestForProject({
+        projectId: project.id,
+        pullRequest
+      });
+      const authorLogin = comment.user?.login ?? null;
+      const authorType = comment.user?.type ?? null;
+      if (isHumanActor(authorType, authorLogin)) {
+        triggerContext = {
+          event: "GITHUB_PR_REVIEW_COMMENT_CREATED",
+          action,
+          pullRequest: {
+            number: pullRecord.prNumber,
+            state: pullRecord.state,
+            title: pullRecord.title,
+            headRefName: pullRecord.headRefName,
+            headSha: pullRecord.headSha,
+            baseRefName: pullRecord.baseRefName,
+            mergedAt: pullRecord.mergedAt?.toISOString() ?? null,
+            updatedAt: pullRecord.updatedAt.toISOString()
+          },
+          reviewComment: {
+            id: comment.id,
+            body: comment.body ?? "",
+            authorLogin,
+            authorType
+          }
+        };
+      }
     }
   }
 
@@ -4220,6 +5615,27 @@ app.post("/api/github/webhooks", express.raw({ type: "*/*" }), async (req, res) 
       lastError: null
     }
   });
+
+  if (triggerContext) {
+    try {
+      await triggerTaskTemplatesForEvent({
+        project: {
+          id: project.id,
+          defaultBranch: project.defaultBranch
+        },
+        deliveryId: req.header("x-github-delivery")?.trim() || null,
+        context: triggerContext,
+        githubIssueId: issueRecord?.id ?? pullRecord?.linkedIssueId ?? null,
+        githubPullRequestId: pullRecord?.id ?? null
+      });
+    } catch (error) {
+      process.stderr.write(
+        `task template trigger failed project=${project.id} event=${eventName}/${action}: ${
+          error instanceof Error ? error.message : String(error)
+        }\n`
+      );
+    }
+  }
 
   res.json({ accepted: true, event: eventName, action, projectId: project.id });
 });
@@ -4521,7 +5937,13 @@ app.get("/api/github/app/manifest/start", async (req, res) => {
         pull_requests: "write",
         checks: "write"
       },
-      default_events: ["issues", "pull_request"]
+      default_events: [
+        "issues",
+        "pull_request",
+        "issue_comment",
+        "pull_request_review",
+        "pull_request_review_comment"
+      ]
     }
   });
 });
@@ -4827,7 +6249,147 @@ function startGitHubReconcileLoop() {
   }, intervalMs);
 }
 
+let taskTemplateSchedulerLoopActive = false;
+async function processScheduledTaskTemplates(): Promise<void> {
+  const now = new Date();
+  const dueCandidates = await prisma.taskTemplate.findMany({
+    where: {
+      active: true,
+      scheduleEnabled: true,
+      scheduleNextRunAt: { lte: now }
+    },
+    orderBy: [{ scheduleNextRunAt: "asc" }],
+    take: TASK_TEMPLATE_SCHEDULER_BATCH_SIZE * 4
+  });
+  if (dueCandidates.length === 0) {
+    return;
+  }
+
+  const globalCandidates = dueCandidates.filter((template) => template.scope === AttractorScope.GLOBAL);
+  const overrideProjectIds = [...new Set(globalCandidates.map((template) => template.projectId))];
+  const overrideNames = [...new Set(globalCandidates.map((template) => template.name))];
+
+  let overrideSet = new Set<string>();
+  if (overrideProjectIds.length > 0 && overrideNames.length > 0) {
+    const overrides = await prisma.taskTemplate.findMany({
+      where: {
+        scope: AttractorScope.PROJECT,
+        projectId: { in: overrideProjectIds },
+        name: { in: overrideNames }
+      },
+      select: {
+        projectId: true,
+        name: true
+      }
+    });
+    overrideSet = new Set(overrides.map((item) => `${item.projectId}:${item.name}`));
+  }
+
+  const effective = dueCandidates.filter((template) => {
+    if (template.scope !== AttractorScope.GLOBAL) {
+      return true;
+    }
+    return !overrideSet.has(`${template.projectId}:${template.name}`);
+  });
+  effective.sort((a, b) => {
+    const left = a.scheduleNextRunAt?.getTime() ?? 0;
+    const right = b.scheduleNextRunAt?.getTime() ?? 0;
+    return left - right;
+  });
+
+  for (const template of effective.slice(0, TASK_TEMPLATE_SCHEDULER_BATCH_SIZE)) {
+    const timezone = (template.scheduleTimezone ?? "").trim() || "UTC";
+    const cron = (template.scheduleCron ?? "").trim();
+    const fallbackNext = new Date(Date.now() + TASK_TEMPLATE_SCHEDULER_INTERVAL_SECONDS * 1000);
+    let nextRunAt: Date | null = null;
+    if (cron && isValidIanaTimeZone(timezone)) {
+      try {
+        nextRunAt = nextCronDate({
+          cron,
+          timeZone: timezone,
+          from: now
+        });
+      } catch {
+        nextRunAt = fallbackNext;
+      }
+    } else {
+      nextRunAt = fallbackNext;
+    }
+
+    try {
+      const queued = await queueRunFromTaskTemplate({
+        projectId: template.projectId,
+        taskTemplateId: template.id,
+        taskTemplateName: template.name,
+        attractorName: template.attractorName,
+        runType: template.runType,
+        sourceBranch: template.sourceBranch,
+        targetBranch: template.targetBranch,
+        environmentMode: template.environmentMode,
+        environmentName: template.environmentName,
+        launchMode: TaskTemplateLaunchMode.SCHEDULE
+      });
+      await prisma.taskTemplate.update({
+        where: { id: template.id },
+        data: {
+          scheduleLastRunAt: now,
+          scheduleLastError: null,
+          scheduleNextRunAt: nextRunAt
+        }
+      });
+      process.stdout.write(
+        `task template scheduled project=${template.projectId} template=${template.id} run=${queued.runId}\n`
+      );
+    } catch (error) {
+      await prisma.taskTemplate.update({
+        where: { id: template.id },
+        data: {
+          scheduleLastError: error instanceof Error ? error.message : String(error),
+          scheduleNextRunAt: nextRunAt
+        }
+      });
+      process.stderr.write(
+        `task template schedule failed template=${template.id}: ${
+          error instanceof Error ? error.message : String(error)
+        }\n`
+      );
+    }
+  }
+}
+
+function startTaskTemplateSchedulerLoop() {
+  if (!TASK_TEMPLATE_SCHEDULER_ENABLED) {
+    process.stdout.write("task template scheduler disabled (TASK_TEMPLATE_SCHEDULER_ENABLED=false)\n");
+    return;
+  }
+
+  process.stdout.write(
+    `task template scheduler interval ${TASK_TEMPLATE_SCHEDULER_INTERVAL_SECONDS}s batch=${TASK_TEMPLATE_SCHEDULER_BATCH_SIZE}\n`
+  );
+  const intervalMs = TASK_TEMPLATE_SCHEDULER_INTERVAL_SECONDS * 1000;
+  const lockKey = "task-templates:scheduler:leader";
+  const lockTtlSeconds = Math.max(5, TASK_TEMPLATE_SCHEDULER_INTERVAL_SECONDS - 1);
+  setInterval(() => {
+    if (taskTemplateSchedulerLoopActive) {
+      return;
+    }
+    taskTemplateSchedulerLoopActive = true;
+    void (async () => {
+      try {
+        const lock = await redis.set(lockKey, "1", "EX", lockTtlSeconds, "NX");
+        if (lock !== "OK") {
+          return;
+        }
+        await processScheduledTaskTemplates();
+      } finally {
+        taskTemplateSchedulerLoopActive = false;
+      }
+    })();
+  }, intervalMs);
+}
+
 server.listen(PORT, HOST, () => {
   process.stdout.write(`factory-api listening on http://${HOST}:${PORT}\n`);
   startGitHubReconcileLoop();
+  startTaskTemplateSchedulerLoop();
 });

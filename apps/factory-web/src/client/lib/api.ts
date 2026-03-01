@@ -13,6 +13,7 @@ import type {
   GitHubInstallationRepo,
   GitHubPullQueueItem,
   GitHubPullRequest,
+  GlobalTaskTemplate,
   GlobalAttractor,
   GlobalSecret,
   Project,
@@ -23,6 +24,9 @@ import type {
   RunReviewChecklist,
   RunReviewResponse,
   RunModelConfig,
+  TaskTemplate,
+  TaskTemplateEventLedgerRecord,
+  TaskTemplateTriggerRule,
   SpecBundle
 } from "./types";
 
@@ -524,6 +528,163 @@ export async function updateProjectAttractor(
     {
       method: "PATCH",
       body: JSON.stringify(input)
+    }
+  );
+}
+
+export async function listGlobalTaskTemplates(): Promise<GlobalTaskTemplate[]> {
+  const payload = await apiRequest<{ templates: GlobalTaskTemplate[] }>("/api/task-templates/global");
+  return payload.templates;
+}
+
+export async function createGlobalTaskTemplate(input: {
+  name: string;
+  attractorName: string;
+  runType: "planning" | "implementation" | "task";
+  sourceBranch?: string;
+  targetBranch?: string;
+  environmentMode?: "PROJECT_DEFAULT" | "NAMED";
+  environmentName?: string | null;
+  scheduleEnabled?: boolean;
+  scheduleCron?: string | null;
+  scheduleTimezone?: string | null;
+  triggers?: TaskTemplateTriggerRule[];
+  description?: string | null;
+  active?: boolean;
+}): Promise<GlobalTaskTemplate> {
+  return apiRequest<GlobalTaskTemplate>("/api/task-templates/global", {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+}
+
+export async function getGlobalTaskTemplate(templateId: string): Promise<GlobalTaskTemplate> {
+  const payload = await apiRequest<{ template: GlobalTaskTemplate }>(`/api/task-templates/global/${templateId}`);
+  return payload.template;
+}
+
+export async function updateGlobalTaskTemplate(
+  templateId: string,
+  input: {
+    name?: string;
+    attractorName?: string;
+    runType?: "planning" | "implementation" | "task";
+    sourceBranch?: string | null;
+    targetBranch?: string | null;
+    environmentMode?: "PROJECT_DEFAULT" | "NAMED";
+    environmentName?: string | null;
+    scheduleEnabled?: boolean;
+    scheduleCron?: string | null;
+    scheduleTimezone?: string | null;
+    triggers?: TaskTemplateTriggerRule[];
+    description?: string | null;
+    active?: boolean;
+  }
+): Promise<GlobalTaskTemplate> {
+  const payload = await apiRequest<{ template: GlobalTaskTemplate }>(`/api/task-templates/global/${templateId}`, {
+    method: "PATCH",
+    body: JSON.stringify(input)
+  });
+  return payload.template;
+}
+
+export async function listProjectTaskTemplates(projectId: string): Promise<TaskTemplate[]> {
+  const payload = await apiRequest<{ templates: TaskTemplate[] }>(`/api/projects/${projectId}/task-templates`);
+  return payload.templates;
+}
+
+export async function createProjectTaskTemplate(
+  projectId: string,
+  input: {
+    name: string;
+    attractorName: string;
+    runType: "planning" | "implementation" | "task";
+    sourceBranch?: string;
+    targetBranch?: string;
+    environmentMode?: "PROJECT_DEFAULT" | "NAMED";
+    environmentName?: string | null;
+    scheduleEnabled?: boolean;
+    scheduleCron?: string | null;
+    scheduleTimezone?: string | null;
+    triggers?: TaskTemplateTriggerRule[];
+    description?: string | null;
+    active?: boolean;
+  }
+): Promise<TaskTemplate> {
+  const payload = await apiRequest<{ template: TaskTemplate }>(`/api/projects/${projectId}/task-templates`, {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+  return payload.template;
+}
+
+export async function getProjectTaskTemplate(projectId: string, templateId: string): Promise<TaskTemplate> {
+  const payload = await apiRequest<{ template: TaskTemplate }>(
+    `/api/projects/${projectId}/task-templates/${templateId}`
+  );
+  return payload.template;
+}
+
+export async function updateProjectTaskTemplate(
+  projectId: string,
+  templateId: string,
+  input: {
+    name?: string;
+    attractorName?: string;
+    runType?: "planning" | "implementation" | "task";
+    sourceBranch?: string | null;
+    targetBranch?: string | null;
+    environmentMode?: "PROJECT_DEFAULT" | "NAMED";
+    environmentName?: string | null;
+    scheduleEnabled?: boolean;
+    scheduleCron?: string | null;
+    scheduleTimezone?: string | null;
+    triggers?: TaskTemplateTriggerRule[];
+    description?: string | null;
+    active?: boolean;
+  }
+): Promise<TaskTemplate> {
+  const payload = await apiRequest<{ template: TaskTemplate }>(
+    `/api/projects/${projectId}/task-templates/${templateId}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(input)
+    }
+  );
+  return payload.template;
+}
+
+export async function launchProjectTaskTemplateRun(
+  projectId: string,
+  templateId: string,
+  input?: { force?: boolean; specBundleId?: string }
+): Promise<{ runId: string; status: string }> {
+  return apiRequest<{ runId: string; status: string }>(
+    `/api/projects/${projectId}/task-templates/${templateId}/runs`,
+    {
+      method: "POST",
+      body: JSON.stringify(input ?? {})
+    }
+  );
+}
+
+export async function listProjectTaskTemplateEvents(
+  projectId: string
+): Promise<Array<TaskTemplateEventLedgerRecord & { taskTemplate?: { id: string; name: string; scope: string } }>> {
+  const payload = await apiRequest<{
+    events: Array<TaskTemplateEventLedgerRecord & { taskTemplate?: { id: string; name: string; scope: string } }>;
+  }>(`/api/projects/${projectId}/task-templates/events`);
+  return payload.events;
+}
+
+export async function replayProjectTaskTemplateEvent(
+  projectId: string,
+  eventId: string
+): Promise<{ runId: string; status: string }> {
+  return apiRequest<{ runId: string; status: string }>(
+    `/api/projects/${projectId}/task-templates/events/${eventId}/replay`,
+    {
+      method: "POST"
     }
   );
 }
