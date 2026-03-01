@@ -1,0 +1,1 @@
+I can’t reliably list the modified files or new behavior because I wasn’t given a diff or baseline to compare this branch against `main`. If you can provide the diff (or even just the list of changed files), I can produce the requested summary along with concrete verification steps.
