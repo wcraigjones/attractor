@@ -143,7 +143,8 @@ const SHELL_POD_READY_TIMEOUT_SECONDS = Number(process.env.SHELL_POD_READY_TIMEO
 const githubSyncConfig = githubSyncConfigFromEnv(process.env);
 const GITHUB_APP_GLOBAL_SECRET_NAME = process.env.GITHUB_APP_GLOBAL_SECRET_NAME ?? "github-app";
 const GITHUB_APP_MANIFEST_URL = "https://github.com/settings/apps/new";
-const digestPinnedImagePattern = /@sha256:[a-f0-9]{64}$/;
+const digestPinnedImagePattern = /@sha256:[a-f0-9]{64}$/i;
+const imageTagPattern = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
 const environmentResourcesSchema = z.object({
   requests: z
     .object({
@@ -537,9 +538,25 @@ function isDigestPinnedImage(value: string): boolean {
   return digestPinnedImagePattern.test(value);
 }
 
-function validateDigestPinnedImage(value: string): string {
-  if (!isDigestPinnedImage(value)) {
-    throw new Error("runnerImage must be pinned by digest (example: ghcr.io/org/image@sha256:...)");
+function isTaggedImage(value: string): boolean {
+  if (value.includes("@")) {
+    return false;
+  }
+  const lastSlash = value.lastIndexOf("/");
+  const lastColon = value.lastIndexOf(":");
+  if (lastColon <= lastSlash) {
+    return false;
+  }
+  const name = value.slice(0, lastColon);
+  const tag = value.slice(lastColon + 1);
+  return name.length > 0 && imageTagPattern.test(tag);
+}
+
+function validateRunnerImageReference(value: string): string {
+  if (!isDigestPinnedImage(value) && !isTaggedImage(value)) {
+    throw new Error(
+      "runnerImage must include a tag or digest (examples: ghcr.io/org/image:latest or ghcr.io/org/image@sha256:...)"
+    );
   }
   return value;
 }
@@ -1766,7 +1783,7 @@ app.post("/api/environments", async (req, res) => {
   }
 
   try {
-    validateDigestPinnedImage(input.data.runnerImage);
+    validateRunnerImageReference(input.data.runnerImage);
   } catch (error) {
     return sendError(res, 400, error instanceof Error ? error.message : String(error));
   }
@@ -1796,7 +1813,7 @@ app.patch("/api/environments/:environmentId", async (req, res) => {
 
   if (input.data.runnerImage) {
     try {
-      validateDigestPinnedImage(input.data.runnerImage);
+      validateRunnerImageReference(input.data.runnerImage);
     } catch (error) {
       return sendError(res, 400, error instanceof Error ? error.message : String(error));
     }

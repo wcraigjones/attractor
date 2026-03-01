@@ -241,7 +241,7 @@ Implemented endpoints:
 - `PUT /api/runs/{runId}/review`
 - `POST /api/runs/{runId}/cancel`
 
-Environment images should be digest-pinned for immutable harness execution (for example `ghcr.io/org/runner@sha256:...`).
+Environment images must include a tag or digest (for example `ghcr.io/org/runner:latest` or `ghcr.io/org/runner@sha256:...`). Digest pins are recommended for immutable harness execution.
 
 ## Prisma
 

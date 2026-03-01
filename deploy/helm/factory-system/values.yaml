@@ -17,6 +17,7 @@ images:
   runner:
     repository: ghcr.io/wcraigjones/attractor-factory-runner
     tag: latest
+    digest: ""
   postgres:
     repository: postgres
     tag: "16"

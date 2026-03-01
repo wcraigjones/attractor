@@ -330,7 +330,7 @@ spec:
             - name: DATABASE_URL
               value: "postgresql://{{ .Values.postgres.user }}:{{ .Values.postgres.password }}@postgres.{{ include "factory.namespace" . }}.svc.cluster.local:5432/{{ .Values.postgres.database }}"
             - name: RUNNER_IMAGE
-              value: "{{ .Values.images.runner.repository }}:{{ .Values.images.runner.tag }}"
+              value: "{{ include "factory.runnerImageRef" . }}"
             - name: GITHUB_APP_SLUG
               value: {{ .Values.github.appSlug | quote }}
             - name: GITHUB_APP_ID
@@ -483,7 +483,7 @@ spec:
             - name: DATABASE_URL
               value: "postgresql://{{ .Values.postgres.user }}:{{ .Values.postgres.password }}@postgres.{{ include "factory.namespace" . }}.svc.cluster.local:5432/{{ .Values.postgres.database }}"
             - name: RUNNER_IMAGE
-              value: "{{ .Values.images.runner.repository }}:{{ .Values.images.runner.tag }}"
+              value: "{{ include "factory.runnerImageRef" . }}"
             - name: FACTORY_API_BASE_URL
               value: "http://factory-api.{{ include "factory.namespace" . }}.svc.cluster.local:{{ .Values.service.api.port }}"
             - name: GITHUB_APP_ID

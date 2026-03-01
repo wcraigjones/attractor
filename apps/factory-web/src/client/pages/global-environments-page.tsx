@@ -20,6 +20,25 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from ".
 
 const DIGEST_PIN_PATTERN = /@sha256:[a-f0-9]{64}$/i;
 
+const IMAGE_TAG_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
+
+function isTaggedImage(value: string): boolean {
+  if (value.includes("@")) {
+    return false;
+  }
+  const lastSlash = value.lastIndexOf("/");
+  const lastColon = value.lastIndexOf(":");
+  if (lastColon <= lastSlash) {
+    return false;
+  }
+  const name = value.slice(0, lastColon);
+  const tag = value.slice(lastColon + 1);
+  return name.length > 0 && IMAGE_TAG_PATTERN.test(tag);
+}
+
+function isValidRunnerImageReference(value: string): boolean {
+  return DIGEST_PIN_PATTERN.test(value) || isTaggedImage(value);
+}
 interface EnvironmentFormState {
   name: string;
   runnerImage: string;
@@ -94,8 +113,10 @@ export function GlobalEnvironmentsPage() {
         throw new Error("Environment name must be between 2 and 80 characters");
       }
       const runnerImage = form.runnerImage.trim();
-      if (!DIGEST_PIN_PATTERN.test(runnerImage)) {
-        throw new Error("Runner image must be digest pinned (example: ghcr.io/org/image@sha256:...)");
+      if (!isValidRunnerImageReference(runnerImage)) {
+        throw new Error(
+          "Runner image must include a tag or digest (examples: ghcr.io/org/image:latest or ghcr.io/org/image@sha256:...)"
+        );
       }
       const resources = toEnvironmentResources(form);
       if (editingEnvironmentId) {
@@ -176,11 +197,11 @@ export function GlobalEnvironmentsPage() {
                 <Input value={form.name} onChange={(event) => setForm((prev) => ({ ...prev, name: event.target.value }))} />
               </div>
               <div className="space-y-1">
-                <Label>Runner Image (digest-pinned)</Label>
+                <Label>Runner Image (tag or digest)</Label>
                 <Input
                   value={form.runnerImage}
                   onChange={(event) => setForm((prev) => ({ ...prev, runnerImage: event.target.value }))}
-                  placeholder="ghcr.io/org/image@sha256:..."
+                  placeholder="ghcr.io/org/image:latest"
                 />
               </div>
               <div className="space-y-1">

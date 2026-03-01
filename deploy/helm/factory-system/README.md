@@ -19,6 +19,7 @@ deploy/helm/factory-system
 
 - `ingress.annotations`: pass ALB annotations (scheme, cert ARN, redirect, health checks)
 - `service.api.annotations`, `service.web.annotations`: per-service annotations
+- `images.runner.digest`: optional runner image digest (`sha256:...`) for `RUNNER_IMAGE` defaults
 - `postgres.storageClassName`, `redis.storageClassName`, `minio.storageClassName`
 - `hpa.api.*`, `hpa.web.*`: optional autoscaling controls
 
@@ -54,6 +55,7 @@ helm upgrade --install factory-system ./deploy/helm/factory-system \
   --set images.controller.tag=<image-tag> \
   --set images.runner.repository=<ecr-runner-repo> \
   --set images.runner.tag=<image-tag> \
+  --set images.runner.digest=<sha256:digest-optional> \
   --set ingress.host=factory.pelx.ai \
   --set ingress.annotations.alb\.ingress\.kubernetes\.io/certificate-arn=<acm-arn>
 ```

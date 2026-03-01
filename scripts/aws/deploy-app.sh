@@ -23,6 +23,7 @@ GOOGLE_OIDC_TOKEN_ENDPOINT="${GOOGLE_OIDC_TOKEN_ENDPOINT:-https://oauth2.googlea
 GOOGLE_OIDC_USER_INFO_ENDPOINT="${GOOGLE_OIDC_USER_INFO_ENDPOINT:-https://openidconnect.googleapis.com/v1/userinfo}"
 GOOGLE_OIDC_ISSUER="${GOOGLE_OIDC_ISSUER:-https://accounts.google.com}"
 GOOGLE_OIDC_AUTH_VALUES=""
+RUNNER_IMAGE_DIGEST="${RUNNER_IMAGE_DIGEST:-}"
 
 ensure_ebs_csi_driver() {
   local oidc_issuer_url oidc_provider_path oidc_provider_arn role_arn tmp_dir attached addon_status elapsed
@@ -233,8 +234,27 @@ ensure_metrics_server
 ensure_gp3_storage_class
 configure_google_oidc_auth
 
+if [[ -n "$RUNNER_IMAGE_DIGEST" && ! "$RUNNER_IMAGE_DIGEST" =~ ^sha256:[A-Fa-f0-9]{64}$ ]]; then
+  echo "error: RUNNER_IMAGE_DIGEST must match sha256:<64 hex chars>" >&2
+  exit 1
+fi
+
 TMP_VALUES="$(mktemp)"
 trap 'rm -f "$TMP_VALUES"' EXIT
+
+runner_image_values="$(cat <<EOF
+  runner:
+    repository: ${RUNNER_REPO_URI}
+    tag: ${IMAGE_TAG}
+EOF
+)"
+if [[ -n "$RUNNER_IMAGE_DIGEST" ]]; then
+  runner_image_values="$(cat <<EOF
+${runner_image_values}
+    digest: ${RUNNER_IMAGE_DIGEST}
+EOF
+)"
+fi
 
 cat > "$TMP_VALUES" <<EOF
 images:
@@ -247,9 +267,7 @@ images:
   controller:
     repository: ${CONTROLLER_REPO_URI}
     tag: ${IMAGE_TAG}
-  runner:
-    repository: ${RUNNER_REPO_URI}
-    tag: ${IMAGE_TAG}
+${runner_image_values}
 ingress:
   host: ${DOMAIN_NAME}
   annotations:
@@ -280,3 +298,6 @@ echo "Helm release deployed."
 echo "Namespace: $NAMESPACE"
 echo "Domain: $DOMAIN_NAME"
 echo "Image tag: $IMAGE_TAG"
+if [[ -n "$RUNNER_IMAGE_DIGEST" ]]; then
+  echo "Runner image digest: $RUNNER_IMAGE_DIGEST"
+fi
