@@ -30,6 +30,7 @@ codeagent> Implement Attractor as described by https://github.com/strongdm/attra
 - `prisma/`: Postgres schema + initial migration
 - `factory/self-bootstrap.dot`: baseline self-factory pipeline definition
 - `factory/task-review-framework.dot`: review loop template (summary/critical/artifacts/checklist/decision)
+- `factory/pr-review-attractor.dot`: PR review attractor (`review_council -> review_summary`)
 - `scripts/`: local image build, OrbStack deploy, and self-bootstrap helpers
 
 ## Local Setup
@@ -40,6 +41,18 @@ npm run prisma:generate
 npm run check-types
 npm run test
 ```
+
+## Docker Dev/Test Setup
+
+Use the Docker-based workspace (includes Postgres/Redis/MinIO and headless Playwright support) for reproducible local testing:
+
+```bash
+docker build -f Dockerfile.dev -t attractor-dev:local .
+./scripts/docker/start-dev-deps.sh
+./scripts/docker/workspace-shell.sh
+```
+
+Full guide: [docs/docker-dev.md](./docs/docker-dev.md)
 
 ## Conformance Suite
 
@@ -172,6 +185,12 @@ API_BASE_URL=http://<traefik-ip>/api \
 npm run self:cycle
 ```
 
+Install the built-in PR review attractor template:
+
+```bash
+API_BASE_URL=http://<traefik-ip>/api npm run attractor:pr-review
+```
+
 ## LLM Runtime
 
 Attractor now mandates [`@mariozechner/pi-ai`](https://github.com/badlogic/pi-mono/tree/main/packages/ai) as the only LLM runtime layer for node execution. No direct provider SDK imports are used in source modules.
@@ -221,6 +240,7 @@ Implemented endpoints:
 - `POST /api/projects/{projectId}/github/issues/{issueNumber}/runs`
 - `GET /api/projects/{projectId}/github/pulls`
 - `GET /api/projects/{projectId}/github/pulls/{prNumber}`
+- `POST /api/projects/{projectId}/github/pulls/{prNumber}/runs`
 - `POST /api/projects/{projectId}/secrets`
 - `GET /api/projects/{projectId}/secrets`
 - `POST /api/projects/{projectId}/attractors`

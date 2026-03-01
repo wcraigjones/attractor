@@ -20,6 +20,7 @@ export interface Environment {
   name: string;
   kind: EnvironmentKind;
   runnerImage: string;
+  setupScript: string | null;
   serviceAccountName: string | null;
   resourcesJson: EnvironmentResources | null;
   active: boolean;
@@ -32,6 +33,7 @@ export interface RunExecutionEnvironment {
   name: string;
   kind: EnvironmentKind;
   runnerImage: string;
+  setupScript?: string;
   serviceAccountName?: string;
   resources?: EnvironmentResources;
 }
@@ -248,13 +250,26 @@ export interface GitHubPullQueueItem {
   pullRequest: GitHubPullRequest & { linkedIssue?: GitHubIssue | null };
   linkedRunId: string | null;
   reviewDecision: ReviewDecision | null;
-  reviewStatus: "Pending" | "Completed" | "Overdue";
+  reviewStatus: "Pending" | "Completed" | "Overdue" | "Stale";
+  stale: boolean;
+  staleReason: string | null;
   risk: "low" | "medium" | "high";
   dueAt: string;
   minutesRemaining: number;
   criticalCount: number;
   artifactCount: number;
   openPackPath: string | null;
+}
+
+export interface GitHubPullLaunchDefaults {
+  sourceBranch: string;
+  targetBranch: string;
+  attractorOptions: Array<{
+    id: string;
+    name: string;
+    defaultRunType: "planning" | "implementation" | "task";
+    modelConfig: RunModelConfig | null;
+  }>;
 }
 
 export interface RunQuestion {

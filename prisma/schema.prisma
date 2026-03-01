@@ -290,6 +290,7 @@ model Environment {
   name               String          @unique
   kind               EnvironmentKind @default(KUBERNETES_JOB)
   runnerImage        String
+  setupScript        String?
   serviceAccountName String?
   resourcesJson      Json?
   active             Boolean         @default(true)

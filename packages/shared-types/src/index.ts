@@ -34,6 +34,7 @@ export interface Environment {
   name: string;
   kind: EnvironmentKind;
   runnerImage: string;
+  setupScript: string | null;
   serviceAccountName: string | null;
   resourcesJson: EnvironmentResources | null;
   active: boolean;
@@ -193,6 +194,7 @@ export interface RunExecutionEnvironment {
   name: string;
   kind: EnvironmentKind;
   runnerImage: string;
+  setupScript?: string;
   serviceAccountName?: string;
   resources?: EnvironmentResources;
 }

@@ -11,6 +11,7 @@ import type {
   GitHubAppStatus,
   GitHubIssue,
   GitHubInstallationRepo,
+  GitHubPullLaunchDefaults,
   GitHubPullQueueItem,
   GitHubPullRequest,
   GlobalAttractor,
@@ -203,8 +204,35 @@ export async function listProjectGitHubPulls(
 export async function getProjectGitHubPull(
   projectId: string,
   prNumber: number
-): Promise<{ pull: GitHubPullQueueItem }> {
+): Promise<{ pull: GitHubPullQueueItem; launchDefaults: GitHubPullLaunchDefaults }> {
   return apiRequest(`/api/projects/${projectId}/github/pulls/${prNumber}`);
+}
+
+export async function launchPullRequestReviewRun(
+  projectId: string,
+  prNumber: number,
+  input: {
+    attractorDefId: string;
+    environmentId?: string;
+    sourceBranch?: string;
+    targetBranch?: string;
+  }
+): Promise<{
+  runId: string;
+  status: string;
+  sourceBranch: string;
+  targetBranch: string;
+  githubPullRequest: {
+    id: string;
+    prNumber: number;
+    url: string;
+    headSha: string;
+  } | null;
+}> {
+  return apiRequest(`/api/projects/${projectId}/github/pulls/${prNumber}/runs`, {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
 }
 
 export async function launchIssueRun(
@@ -255,6 +283,7 @@ export async function createEnvironment(input: {
   name: string;
   kind?: "KUBERNETES_JOB";
   runnerImage: string;
+  setupScript?: string;
   serviceAccountName?: string;
   resourcesJson?: EnvironmentResources;
   active?: boolean;
@@ -270,6 +299,7 @@ export async function updateEnvironment(
   input: {
     name?: string;
     runnerImage?: string;
+    setupScript?: string | null;
     serviceAccountName?: string | null;
     resourcesJson?: EnvironmentResources | null;
     active?: boolean;

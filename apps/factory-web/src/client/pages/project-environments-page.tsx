@@ -101,6 +101,10 @@ export function ProjectEnvironmentsPage() {
               <span className="text-muted-foreground">Runner:</span>{" "}
               <span className="mono text-xs">{defaultEnvironment?.runnerImage ?? "-"}</span>
             </p>
+            <p>
+              <span className="text-muted-foreground">Setup Script:</span>{" "}
+              {defaultEnvironment?.setupScript ? "configured" : "-"}
+            </p>
           </CardContent>
         </Card>
 
@@ -115,6 +119,7 @@ export function ProjectEnvironmentsPage() {
                 <TableRow>
                   <TableHead>Name</TableHead>
                   <TableHead>Runner Image</TableHead>
+                  <TableHead>Setup</TableHead>
                   <TableHead>Service Account</TableHead>
                   <TableHead>Resources</TableHead>
                   <TableHead>Status</TableHead>
@@ -126,6 +131,7 @@ export function ProjectEnvironmentsPage() {
                   <TableRow key={environment.id}>
                     <TableCell>{environment.name}</TableCell>
                     <TableCell className="mono text-xs">{environment.runnerImage}</TableCell>
+                    <TableCell>{environment.setupScript ? "configured" : "-"}</TableCell>
                     <TableCell>{environment.serviceAccountName ?? "-"}</TableCell>
                     <TableCell className="mono text-xs">
                       req(cpu={environment.resourcesJson?.requests?.cpu ?? "-"},mem={environment.resourcesJson?.requests?.memory ?? "-"}){" "}

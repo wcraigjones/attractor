@@ -63,11 +63,14 @@ import {
   githubSyncConfigFromEnv,
   hasFeedbackText,
   inferPrRiskLevel,
+  isReviewRunStale,
   issueTargetBranch,
   parseIssueNumbers,
+  pullReviewStatus,
   reviewSummaryMarkdown,
   verifyGitHubWebhookSignature
 } from "./github-sync.js";
+import { assertReviewAttractorFlow } from "./review-attractor.js";
 import {
   type ReviewCriticalSection,
   defaultReviewChecklistValue,
@@ -577,6 +580,7 @@ function toRunExecutionEnvironment(environment: {
   name: string;
   kind: EnvironmentKind;
   runnerImage: string;
+  setupScript: string | null;
   serviceAccountName: string | null;
   resourcesJson: unknown;
 }): RunExecutionEnvironment {
@@ -586,6 +590,7 @@ function toRunExecutionEnvironment(environment: {
     name: environment.name,
     kind: environment.kind,
     runnerImage: environment.runnerImage,
+    ...(environment.setupScript ? { setupScript: environment.setupScript } : {}),
     ...(environment.serviceAccountName ? { serviceAccountName: environment.serviceAccountName } : {}),
     ...(resources ? { resources } : {})
   };
@@ -1751,6 +1756,7 @@ const createEnvironmentSchema = z.object({
   name: z.string().min(2).max(80),
   kind: z.enum(["KUBERNETES_JOB"]).default("KUBERNETES_JOB"),
   runnerImage: z.string().min(1),
+  setupScript: z.string().max(20000).optional(),
   serviceAccountName: z.string().min(1).optional(),
   resourcesJson: environmentResourcesSchema.optional(),
   active: z.boolean().optional()
@@ -1760,6 +1766,7 @@ const patchEnvironmentSchema = z
   .object({
     name: z.string().min(2).max(80).optional(),
     runnerImage: z.string().min(1).optional(),
+    setupScript: z.string().max(20000).nullable().optional(),
     serviceAccountName: z.string().min(1).nullable().optional(),
     resourcesJson: environmentResourcesSchema.optional(),
     active: z.boolean().optional()
@@ -1794,6 +1801,7 @@ app.post("/api/environments", async (req, res) => {
         name: input.data.name,
         kind: input.data.kind,
         runnerImage: input.data.runnerImage,
+        setupScript: toNullableText(input.data.setupScript),
         serviceAccountName: input.data.serviceAccountName,
         resourcesJson: input.data.resourcesJson,
         active: input.data.active ?? true
@@ -1825,6 +1833,9 @@ app.patch("/api/environments/:environmentId", async (req, res) => {
       data: {
         ...(input.data.name !== undefined ? { name: input.data.name } : {}),
         ...(input.data.runnerImage !== undefined ? { runnerImage: input.data.runnerImage } : {}),
+        ...(input.data.setupScript !== undefined
+          ? { setupScript: toNullableText(input.data.setupScript ?? undefined) }
+          : {}),
         ...(input.data.serviceAccountName !== undefined
           ? { serviceAccountName: input.data.serviceAccountName }
           : {}),
@@ -3542,6 +3553,182 @@ app.post("/api/projects/:projectId/github/issues/:issueNumber/runs", async (req,
   });
 });
 
+const createPullReviewRunSchema = z.object({
+  attractorDefId: z.string().min(1),
+  environmentId: z.string().min(1).optional(),
+  sourceBranch: z.string().min(1).optional(),
+  targetBranch: z.string().min(1).optional()
+});
+
+app.post("/api/projects/:projectId/github/pulls/:prNumber/runs", async (req, res) => {
+  const prNumber = Number.parseInt(req.params.prNumber, 10);
+  if (!Number.isInteger(prNumber) || prNumber <= 0) {
+    return sendError(res, 400, "prNumber must be a positive integer");
+  }
+
+  const input = createPullReviewRunSchema.safeParse(req.body);
+  if (!input.success) {
+    return sendError(res, 400, input.error.message);
+  }
+
+  const [project, pullRequest] = await Promise.all([
+    prisma.project.findUnique({ where: { id: req.params.projectId } }),
+    prisma.gitHubPullRequest.findUnique({
+      where: {
+        projectId_prNumber: {
+          projectId: req.params.projectId,
+          prNumber
+        }
+      }
+    })
+  ]);
+
+  if (!project) {
+    return sendError(res, 404, "project not found");
+  }
+  if (!pullRequest) {
+    return sendError(res, 404, "pull request not found");
+  }
+  if (pullRequest.state !== "open") {
+    return sendError(res, 409, "pull request must be open to launch a review attractor");
+  }
+
+  const attractorDef = await prisma.attractorDef.findUnique({
+    where: { id: input.data.attractorDefId }
+  });
+  if (!attractorDef || attractorDef.projectId !== project.id) {
+    return sendError(res, 404, "attractor definition not found in project");
+  }
+  if (!attractorDef.active) {
+    return sendError(res, 409, "attractor definition is inactive");
+  }
+  if (attractorDef.defaultRunType !== RunType.task) {
+    return sendError(res, 409, "review attractor must be configured as a task run");
+  }
+  let modelConfig: RunModelConfig;
+  try {
+    modelConfig = requireAttractorModelConfig({
+      modelConfig: attractorDef.modelConfig,
+      attractorName: attractorDef.name
+    });
+  } catch (error) {
+    return sendError(res, 409, error instanceof Error ? error.message : String(error));
+  }
+
+  const providerSecretExists = await hasEffectiveProviderSecret(project.id, modelConfig.provider);
+  if (!providerSecretExists) {
+    return sendError(
+      res,
+      409,
+      `Missing provider secret for ${modelConfig.provider}. Configure it in Project Secret or Global Secret UI first.`
+    );
+  }
+
+  let attractorSnapshot;
+  try {
+    attractorSnapshot = await resolveAttractorSnapshotForRun({
+      id: attractorDef.id,
+      name: attractorDef.name,
+      scope: attractorDef.scope,
+      contentPath: attractorDef.contentPath,
+      contentVersion: attractorDef.contentVersion
+    });
+  } catch (error) {
+    return sendError(res, 409, error instanceof Error ? error.message : String(error));
+  }
+
+  const attractorContent = await loadAttractorContentFromStorage(attractorSnapshot.contentPath);
+  if (!attractorContent) {
+    return sendError(
+      res,
+      409,
+      `review attractor content is unavailable at ${attractorSnapshot.contentPath}`
+    );
+  }
+
+  let reviewFlowNodes;
+  try {
+    reviewFlowNodes = assertReviewAttractorFlow(attractorContent);
+  } catch (error) {
+    return sendError(res, 409, error instanceof Error ? error.message : String(error));
+  }
+
+  let resolvedEnvironment;
+  try {
+    resolvedEnvironment = await resolveRunEnvironment({
+      projectId: project.id,
+      explicitEnvironmentId: input.data.environmentId
+    });
+  } catch (error) {
+    return sendError(res, 409, error instanceof Error ? error.message : String(error));
+  }
+
+  const sourceBranch = input.data.sourceBranch ?? pullRequest.headRefName ?? project.defaultBranch ?? "main";
+  const targetBranch = input.data.targetBranch ?? sourceBranch;
+
+  const run = await prisma.run.create({
+    data: {
+      projectId: project.id,
+      attractorDefId: attractorDef.id,
+      attractorContentPath: attractorSnapshot.contentPath,
+      attractorContentVersion: attractorSnapshot.contentVersion,
+      attractorContentSha256: attractorSnapshot.contentSha256,
+      githubIssueId: pullRequest.linkedIssueId,
+      githubPullRequestId: pullRequest.id,
+      environmentId: resolvedEnvironment.id,
+      environmentSnapshot: resolvedEnvironment.snapshot as never,
+      runType: RunType.task,
+      sourceBranch,
+      targetBranch,
+      status: RunStatus.QUEUED
+    },
+    include: {
+      githubPullRequest: true
+    }
+  });
+
+  await appendRunEvent(run.id, "RunQueued", {
+    runId: run.id,
+    runType: run.runType,
+    projectId: run.projectId,
+    targetBranch: run.targetBranch,
+    attractorSnapshot,
+    modelConfig,
+    environment: resolvedEnvironment.snapshot,
+    runnerImage: resolvedEnvironment.snapshot.runnerImage,
+    githubPullRequest: run.githubPullRequest
+      ? {
+          id: run.githubPullRequest.id,
+          prNumber: run.githubPullRequest.prNumber,
+          title: run.githubPullRequest.title,
+          url: run.githubPullRequest.url,
+          headSha: run.githubPullRequest.headSha
+        }
+      : null,
+    reviewFlow: {
+      fromNodeId: reviewFlowNodes.councilNodeId,
+      toNodeId: reviewFlowNodes.summaryNodeId
+    }
+  });
+
+  await redis.lpush(runQueueKey(), run.id);
+
+  res.status(201).json({
+    runId: run.id,
+    status: run.status,
+    sourceBranch: run.sourceBranch,
+    targetBranch: run.targetBranch,
+    githubPullRequest: run.githubPullRequest
+      ? {
+          id: run.githubPullRequest.id,
+          prNumber: run.githubPullRequest.prNumber,
+          url: run.githubPullRequest.url,
+          headSha: run.githubPullRequest.headSha
+        }
+      : null
+  });
+});
+
 const selfIterateSchema = z.object({
   attractorDefId: z.string().min(1),
   environmentId: z.string().min(1).optional(),
@@ -4375,11 +4562,15 @@ app.get("/api/projects/:projectId/github/pulls", async (req, res) => {
     const linkedRun = runByPull.get(pull.id) ?? null;
     const dueAt = new Date(pull.openedAt.getTime() + 24 * 60 * 60 * 1000);
     const minutesRemaining = Math.ceil((dueAt.getTime() - now) / 60000);
-    const reviewStatus = linkedRun?.review
-      ? "Completed"
-      : minutesRemaining < 0
-        ? "Overdue"
-        : "Pending";
+    const stale = isReviewRunStale({
+      currentHeadSha: pull.headSha,
+      reviewedHeadSha: linkedRun?.review?.reviewedHeadSha
+    });
+    const reviewStatus = pullReviewStatus({
+      hasReview: Boolean(linkedRun?.review),
+      stale,
+      minutesRemaining
+    });
     const criticalCount = Array.isArray(linkedRun?.review?.criticalSectionsSnapshotJson)
       ? (linkedRun?.review?.criticalSectionsSnapshotJson as unknown[]).length
       : 0;
@@ -4393,6 +4584,11 @@ app.get("/api/projects/:projectId/github/pulls", async (req, res) => {
       linkedRunId: linkedRun?.id ?? null,
       reviewDecision: linkedRun?.review?.decision ?? null,
       reviewStatus,
+      stale,
+      staleReason:
+        stale && linkedRun?.review?.reviewedHeadSha
+          ? `Last reviewed SHA ${linkedRun.review.reviewedHeadSha.slice(0, 12)} differs from current head ${pull.headSha.slice(0, 12)}.`
+          : null,
       risk,
       dueAt: dueAt.toISOString(),
       minutesRemaining,
@@ -4436,14 +4632,33 @@ app.get("/api/projects/:projectId/github/pulls/:prNumber", async (req, res) => {
     },
     orderBy: { createdAt: "desc" }
   });
+  const [project, attractors] = await Promise.all([
+    prisma.project.findUnique({
+      where: { id: req.params.projectId },
+      select: { defaultBranch: true }
+    }),
+    prisma.attractorDef.findMany({
+      where: {
+        projectId: req.params.projectId,
+        active: true,
+        defaultRunType: RunType.task
+      },
+      orderBy: { createdAt: "desc" }
+    })
+  ]);
 
   const dueAt = new Date(pullRequest.openedAt.getTime() + 24 * 60 * 60 * 1000);
   const minutesRemaining = Math.ceil((dueAt.getTime() - Date.now()) / 60000);
-  const reviewStatus = linkedRun?.review
-    ? "Completed"
-    : minutesRemaining < 0
-      ? "Overdue"
-      : "Pending";
+  const stale = isReviewRunStale({
+    currentHeadSha: pullRequest.headSha,
+    reviewedHeadSha: linkedRun?.review?.reviewedHeadSha
+  });
+  const reviewStatus = pullReviewStatus({
+    hasReview: Boolean(linkedRun?.review),
+    stale,
+    minutesRemaining
+  });
+  const defaultSourceBranch = pullRequest.headRefName || project?.defaultBranch || "main";
 
   res.json({
     pull: {
@@ -4451,6 +4666,11 @@ app.get("/api/projects/:projectId/github/pulls/:prNumber", async (req, res) => {
       linkedRunId: linkedRun?.id ?? null,
       reviewDecision: linkedRun?.review?.decision ?? null,
       reviewStatus,
+      stale,
+      staleReason:
+        stale && linkedRun?.review?.reviewedHeadSha
+          ? `Last reviewed SHA ${linkedRun.review.reviewedHeadSha.slice(0, 12)} differs from current head ${pullRequest.headSha.slice(0, 12)}.`
+          : null,
       risk: inferPrRiskLevel({
         title: pullRequest.title,
         body: pullRequest.body,
@@ -4463,6 +4683,16 @@ app.get("/api/projects/:projectId/github/pulls/:prNumber", async (req, res) => {
         : 0,
       artifactCount: linkedRun?._count.artifacts ?? 0,
       openPackPath: linkedRun ? `/runs/${linkedRun.id}?tab=review` : null
+    },
+    launchDefaults: {
+      sourceBranch: defaultSourceBranch,
+      targetBranch: defaultSourceBranch,
+      attractorOptions: attractors.map((attractor) => ({
+        id: attractor.id,
+        name: attractor.name,
+        defaultRunType: attractor.defaultRunType,
+        modelConfig: attractor.modelConfig
+      }))
     }
   });
 });

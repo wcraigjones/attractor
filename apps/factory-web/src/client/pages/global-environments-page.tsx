@@ -17,9 +17,9 @@ import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
+import { Textarea } from "../components/ui/textarea";
 
 const DIGEST_PIN_PATTERN = /@sha256:[a-f0-9]{64}$/i;
-
 const IMAGE_TAG_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
 
 function isTaggedImage(value: string): boolean {
@@ -39,9 +39,11 @@ function isTaggedImage(value: string): boolean {
 function isValidRunnerImageReference(value: string): boolean {
   return DIGEST_PIN_PATTERN.test(value) || isTaggedImage(value);
 }
+
 interface EnvironmentFormState {
   name: string;
   runnerImage: string;
+  setupScript: string;
   serviceAccountName: string;
   requestCpu: string;
   requestMemory: string;
@@ -54,6 +56,7 @@ function emptyEnvironmentForm(): EnvironmentFormState {
   return {
     name: "",
     runnerImage: "",
+    setupScript: "",
     serviceAccountName: "",
     requestCpu: "",
     requestMemory: "",
@@ -85,6 +88,7 @@ function toFormState(environment: Environment): EnvironmentFormState {
   return {
     name: environment.name,
     runnerImage: environment.runnerImage,
+    setupScript: environment.setupScript ?? "",
     serviceAccountName: environment.serviceAccountName ?? "",
     requestCpu: environment.resourcesJson?.requests?.cpu ?? "",
     requestMemory: environment.resourcesJson?.requests?.memory ?? "",
@@ -123,6 +127,7 @@ export function GlobalEnvironmentsPage() {
         return updateEnvironment(editingEnvironmentId, {
           name,
           runnerImage,
+          setupScript: form.setupScript.length > 0 ? form.setupScript : null,
           serviceAccountName: form.serviceAccountName.trim().length > 0 ? form.serviceAccountName.trim() : null,
           ...(resources ? { resourcesJson: resources } : { resourcesJson: null }),
           active: form.active
@@ -132,6 +137,7 @@ export function GlobalEnvironmentsPage() {
         name,
         kind: "KUBERNETES_JOB",
         runnerImage,
+        ...(form.setupScript.length > 0 ? { setupScript: form.setupScript } : {}),
         ...(form.serviceAccountName.trim().length > 0 ? { serviceAccountName: form.serviceAccountName.trim() } : {}),
         ...(resources ? { resourcesJson: resources } : {}),
         active: form.active
@@ -210,6 +216,15 @@ export function GlobalEnvironmentsPage() {
                   value={form.serviceAccountName}
                   onChange={(event) => setForm((prev) => ({ ...prev, serviceAccountName: event.target.value }))}
                   placeholder="factory-runner"
+                />
+              </div>
+              <div className="space-y-1">
+                <Label>Setup Script (optional, runs at run startup)</Label>
+                <Textarea
+                  value={form.setupScript}
+                  onChange={(event) => setForm((prev) => ({ ...prev, setupScript: event.target.value }))}
+                  placeholder={"npm ci\nnpm run prisma:generate"}
+                  rows={6}
                 />
               </div>
               <div className="grid gap-3 md:grid-cols-2">
@@ -294,6 +309,7 @@ export function GlobalEnvironmentsPage() {
                   <TableHead>Name</TableHead>
                   <TableHead>Kind</TableHead>
                   <TableHead>Runner Image</TableHead>
+                  <TableHead>Setup</TableHead>
                   <TableHead>Service Account</TableHead>
                   <TableHead>Resources</TableHead>
                   <TableHead>Status</TableHead>
@@ -307,6 +323,7 @@ export function GlobalEnvironmentsPage() {
                     <TableCell>{environment.name}</TableCell>
                     <TableCell>{environment.kind}</TableCell>
                     <TableCell className="mono text-xs">{environment.runnerImage}</TableCell>
+                    <TableCell>{environment.setupScript ? "configured" : "-"}</TableCell>
                     <TableCell>{environment.serviceAccountName ?? "-"}</TableCell>
                     <TableCell className="mono text-xs">
                       req(cpu={environment.resourcesJson?.requests?.cpu ?? "-"},mem={environment.resourcesJson?.requests?.memory ?? "-"}){" "}
