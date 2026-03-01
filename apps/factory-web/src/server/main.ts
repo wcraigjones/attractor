@@ -23,12 +23,12 @@ app.set("trust proxy", true);
 const PORT = Number(process.env.PORT ?? 3000);
 const HOST = process.env.HOST ?? "0.0.0.0";
 const API_BASE_URL = process.env.API_BASE_URL ?? "/api";
+const FACTORY_VERSION = (process.env.FACTORY_VERSION ?? "").trim() || "unknown";
 const authConfig = resolveAuthConfig(process.env);
 
 if (authConfig.enabled) {
   process.stdout.write(`factory-web auth enabled for domain ${authConfig.allowedDomain}\n`);
 }
-const FACTORY_VERSION = (process.env.FACTORY_VERSION ?? "").trim() || "unknown";
 
 const currentDir = resolve(fileURLToPath(new URL(".", import.meta.url)));
 const clientDist = resolve(currentDir, "../client");
