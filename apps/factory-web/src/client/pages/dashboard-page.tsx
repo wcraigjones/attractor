@@ -24,7 +24,7 @@ export function DashboardPage() {
         description="System snapshot with quick entry points into projects and runs."
         actions={
           <Button asChild>
-            <Link to="/projects">Create Or Open Project</Link>
+            <Link to="/setup">Start Setup Wizard</Link>
           </Button>
         }
       />
@@ -86,6 +86,9 @@ export function DashboardPage() {
           <CardContent className="grid gap-2">
             <Button asChild variant="outline">
               <Link to="/projects">Manage Projects</Link>
+            </Button>
+            <Button asChild variant="outline">
+              <Link to="/setup">Setup Wizard</Link>
             </Button>
             <Button asChild variant="outline">
               <Link to={latestProjectId ? `/projects/${latestProjectId}/secrets` : "/projects"}>Manage Secrets</Link>

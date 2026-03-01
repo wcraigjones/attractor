@@ -1,4 +1,5 @@
 import { Navigate, Route, Routes } from "react-router-dom";
+import { Toaster } from "./components/ui/toast";
 
 import { AppShell } from "./components/layout/app-shell";
 import { ArtifactViewerPage } from "./pages/artifact-viewer-page";
@@ -18,13 +19,17 @@ import { ProjectsPage } from "./pages/projects-page";
 import { ProjectEnvironmentsPage } from "./pages/project-environments-page";
 import { ProjectRunsPage } from "./pages/project-runs-page";
 import { ProjectSecretsPage } from "./pages/project-secrets-page";
+import { ProjectSetupWizardPage } from "./pages/project-setup-wizard-page";
 import { RunDetailPage } from "./pages/run-detail-page";
 
 export function App() {
   return (
+    <>
+    <Toaster />
     <Routes>
       <Route path="/" element={<AppShell />}>
         <Route index element={<DashboardPage />} />
+        <Route path="setup" element={<ProjectSetupWizardPage />} />
         <Route path="projects" element={<ProjectsPage />} />
         <Route path="environments/global" element={<GlobalEnvironmentsPage />} />
         <Route path="attractors/global" element={<GlobalAttractorsPage />} />
@@ -34,6 +39,7 @@ export function App() {
         <Route path="projects/:projectId/environments" element={<ProjectEnvironmentsPage />} />
         <Route path="projects/:projectId/secrets" element={<ProjectSecretsPage />} />
         <Route path="projects/:projectId/attractors" element={<ProjectAttractorsPage />} />
+        <Route path="projects/:projectId/setup" element={<ProjectSetupWizardPage />} />
         <Route path="projects/:projectId/attractors/:attractorId" element={<ProjectAttractorStudioPage />} />
         <Route path="projects/:projectId/github/issues" element={<ProjectGitHubIssuesPage />} />
         <Route path="projects/:projectId/github/issues/:issueNumber" element={<ProjectGitHubIssueDetailPage />} />
@@ -46,5 +52,6 @@ export function App() {
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
+    </>
   );
 }

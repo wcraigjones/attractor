@@ -3,6 +3,10 @@ import { describe, expect, it } from "vitest";
 import { pathForProjectSelection } from "../apps/factory-web/src/client/lib/project-routing";
 
 describe("project routing helpers", () => {
+  it("routes setup entry path to project setup", () => {
+    expect(pathForProjectSelection("/setup", "proj-b")).toBe("/projects/proj-b/setup");
+  });
+
   it("keeps project sub-route when switching project", () => {
     expect(pathForProjectSelection("/projects/proj-a/secrets", "proj-b")).toBe("/projects/proj-b/secrets");
     expect(pathForProjectSelection("/projects/proj-a/runs", "proj-b")).toBe("/projects/proj-b/runs");

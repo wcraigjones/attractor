@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
+import { toast } from "../components/ui/toast";
 
 import { getGlobalSecretValues, listGlobalSecrets, listProviderSchemas, upsertGlobalSecret } from "../lib/api";
 import { ARBITRARY_SECRET_PROVIDER, formatSecretProvider } from "../lib/secrets-view";

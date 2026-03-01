@@ -1,7 +1,7 @@
 import { Suspense, lazy } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { toast } from "sonner";
+import { toast } from "../components/ui/toast";
 
 import { artifactDownloadUrl, getArtifactContent } from "../lib/api";
 import { monacoLanguageForArtifact } from "../lib/artifact-language";

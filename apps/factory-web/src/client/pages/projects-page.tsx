@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
+import { toast } from "../components/ui/toast";
 
 import { createProject, listProjects } from "../lib/api";
 import { PageTitle } from "../components/layout/page-title";
@@ -50,7 +50,15 @@ export function ProjectsPage() {
 
   return (
     <div>
-      <PageTitle title="Projects" description="Create project namespaces and connect repositories." />
+      <PageTitle
+        title="Projects"
+        description="Create project namespaces and connect repositories."
+        actions={
+          <Button asChild variant="outline">
+            <Link to="/setup">Setup Wizard</Link>
+          </Button>
+        }
+      />
 
       <div className="grid gap-4 lg:grid-cols-[2fr,1fr]">
         <Card>

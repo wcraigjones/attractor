@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
+import { toast } from "../components/ui/toast";
 
 import { createAttractor, getProjectAttractor, listAttractors } from "../lib/api";
 import { buildProjectAttractorsViewRows, type AttractorRowStatus } from "../lib/attractors-view";
