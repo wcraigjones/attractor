@@ -1,12 +1,18 @@
 import express from "express";
+import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { PassThrough, Readable, Writable } from "node:stream";
+import { promisify } from "node:util";
 import { KubeConfig, CoreV1Api, Exec } from "@kubernetes/client-node";
 import { App as GitHubApp } from "@octokit/app";
 import {
+  AgentActionRisk,
+  AgentActionStatus,
+  AgentMessageRole,
+  AgentScope,
   AttractorScope,
   EnvironmentKind,
   PrismaClient,
@@ -18,7 +24,18 @@ import {
   TaskTemplateLaunchMode
 } from "@prisma/client";
 import { Redis } from "ioredis";
-import { getModels, getProviders } from "@mariozechner/pi-ai";
+import {
+  completeSimple,
+  getModel,
+  getModels,
+  getProviders,
+  Type,
+  validateToolCall,
+  type AssistantMessage,
+  type Context,
+  type Tool,
+  type ToolCall
+} from "@mariozechner/pi-ai";
 import { WebSocketServer, WebSocket } from "ws";
 import type { RawData } from "ws";
 import {
@@ -94,6 +111,7 @@ import {
 
 const prisma = new PrismaClient();
 const redis = new Redis(process.env.REDIS_URL ?? "redis://127.0.0.1:6379");
+const execFileAsync = promisify(execFile);
 
 const app = express();
 const jsonBodyParser = express.json({ limit: "2mb" });
@@ -167,6 +185,22 @@ const TASK_TEMPLATE_SCHEDULER_BATCH_SIZE = Math.max(
   1,
   Math.min(500, Number.parseInt(process.env.TASK_TEMPLATE_SCHEDULER_BATCH_SIZE ?? "50", 10) || 50)
 );
+const AGENT_MODEL_PROVIDER = (process.env.AGENT_MODEL_PROVIDER ?? "google").trim();
+const AGENT_MODEL_ID = (process.env.AGENT_MODEL_ID ?? "gemini-3.1-pro-preview").trim();
+const AGENT_REASONING_LEVEL = (process.env.AGENT_REASONING_LEVEL ?? "high").trim().toLowerCase();
+const AGENT_MAX_TOOL_ROUNDS = Math.max(
+  1,
+  Math.min(8, Number.parseInt(process.env.AGENT_MAX_TOOL_ROUNDS ?? "4", 10) || 4)
+);
+const AGENT_SHELL_TIMEOUT_SECONDS = Math.max(
+  5,
+  Math.min(600, Number.parseInt(process.env.AGENT_SHELL_TIMEOUT_SECONDS ?? "120", 10) || 120)
+);
+const AGENT_SHELL_MAX_OUTPUT_CHARS = Math.max(
+  2_000,
+  Math.min(200_000, Number.parseInt(process.env.AGENT_SHELL_MAX_OUTPUT_CHARS ?? "20000", 10) || 20000)
+);
+const AGENT_DEFAULT_SESSION_TITLE = "Factory Assistant";
 const digestPinnedImagePattern = /@sha256:[a-f0-9]{64}$/i;
 const imageTagPattern = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
 const environmentResourcesSchema = z.object({
@@ -516,6 +550,38 @@ function hasModel(provider: string, modelId: string): boolean {
   }
   return getModels(provider as never).some((model) => model.id === modelId);
 }
+
+function normalizeAgentReasoningLevel(
+  value: string
+): RunModelConfig["reasoningLevel"] | undefined {
+  if (
+    value === "minimal" ||
+    value === "low" ||
+    value === "medium" ||
+    value === "high" ||
+    value === "xhigh"
+  ) {
+    return value;
+  }
+  return undefined;
+}
+
+if (!hasProvider(AGENT_MODEL_PROVIDER)) {
+  throw new Error(`Unknown AGENT_MODEL_PROVIDER: ${AGENT_MODEL_PROVIDER}`);
+}
+if (!hasModel(AGENT_MODEL_PROVIDER, AGENT_MODEL_ID)) {
+  throw new Error(
+    `Unknown AGENT_MODEL_ID "${AGENT_MODEL_ID}" for provider "${AGENT_MODEL_PROVIDER}"`
+  );
+}
+const agentModel = getModel(AGENT_MODEL_PROVIDER as never, AGENT_MODEL_ID as never);
+if (!agentModel) {
+  throw new Error(
+    `Unable to resolve agent model ${AGENT_MODEL_PROVIDER}/${AGENT_MODEL_ID} from model catalog`
+  );
+}
+const agentReasoningLevel =
+  normalizeAgentReasoningLevel(AGENT_REASONING_LEVEL) ?? "high";
 
 const runModelConfigSchema = z.object({
   provider: z.string().min(1),
@@ -2279,6 +2345,828 @@ async function postReviewWriteback(reviewId: string): Promise<{
   };
 }
 
+class ApiError extends Error {
+  constructor(
+    readonly status: number,
+    message: string
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+function getRequestActorEmail(req: express.Request): string | null {
+  if (!authConfig.enabled) {
+    return null;
+  }
+  const cookies = parseCookieHeader(req.headers.cookie);
+  const session = readSessionToken(authConfig, cookies[FACTORY_AUTH_SESSION_COOKIE_NAME]);
+  return session?.email ?? null;
+}
+
+function clampAgentText(value: string, maxChars = 2000): string {
+  if (value.length <= maxChars) {
+    return value;
+  }
+  return `${value.slice(0, maxChars)}…`;
+}
+
+function summarizeMessageContent(message: string, maxChars = 180): string {
+  return clampAgentText(message.replace(/\s+/g, " ").trim(), maxChars);
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  return value as Record<string, unknown>;
+}
+
+function ensureProjectScopeSession(session: { scope: AgentScope; projectId: string | null }): string {
+  if (session.scope !== AgentScope.PROJECT || !session.projectId) {
+    throw new ApiError(400, "session is not project scoped; provide projectId explicitly");
+  }
+  return session.projectId;
+}
+
+function resolveAgentProjectId(
+  session: { scope: AgentScope; projectId: string | null },
+  maybeProjectId: unknown
+): string {
+  if (typeof maybeProjectId === "string" && maybeProjectId.trim().length > 0) {
+    return maybeProjectId.trim();
+  }
+  return ensureProjectScopeSession(session);
+}
+
+function toAgentHistoryPrompt(messages: Array<{ role: AgentMessageRole; content: string; createdAt: Date }>): string {
+  if (messages.length === 0) {
+    return "(no prior chat history)";
+  }
+  return messages
+    .map((message) => {
+      const role = message.role.toLowerCase();
+      const at = message.createdAt.toISOString();
+      return `[${at}] ${role}: ${message.content}`;
+    })
+    .join("\n");
+}
+
+function textFromAssistantMessage(message: AssistantMessage): string {
+  return message.content
+    .filter((block): block is { type: "text"; text: string } => block.type === "text")
+    .map((block) => block.text)
+    .join("")
+    .trim();
+}
+
+async function touchAgentSession(sessionId: string): Promise<void> {
+  await prisma.agentSession.update({
+    where: { id: sessionId },
+    data: { updatedAt: new Date() }
+  });
+}
+
+async function ensureAgentSession(sessionId: string) {
+  const session = await prisma.agentSession.findUnique({
+    where: { id: sessionId }
+  });
+  if (!session || session.archivedAt) {
+    throw new ApiError(404, "agent session not found");
+  }
+  return session;
+}
+
+type AgentToolName =
+  | "list_projects"
+  | "get_project_overview"
+  | "list_project_runs"
+  | "list_project_pulls"
+  | "list_project_issues"
+  | "get_run_status"
+  | "reconcile_project_github"
+  | "redeploy_project"
+  | "cancel_run"
+  | "execute_shell";
+
+const agentTools: Tool[] = [
+  {
+    name: "list_projects",
+    description: "List projects in the factory.",
+    parameters: Type.Object({})
+  },
+  {
+    name: "get_project_overview",
+    description: "Get high-level status for a project.",
+    parameters: Type.Object({
+      projectId: Type.Optional(Type.String())
+    })
+  },
+  {
+    name: "list_project_runs",
+    description: "List recent runs for a project.",
+    parameters: Type.Object({
+      projectId: Type.Optional(Type.String()),
+      limit: Type.Optional(Type.Number({ minimum: 1, maximum: 100 })),
+      status: Type.Optional(Type.String())
+    })
+  },
+  {
+    name: "list_project_pulls",
+    description: "List project pull requests from synchronized GitHub data.",
+    parameters: Type.Object({
+      projectId: Type.Optional(Type.String()),
+      state: Type.Optional(Type.String()),
+      limit: Type.Optional(Type.Number({ minimum: 1, maximum: 100 }))
+    })
+  },
+  {
+    name: "list_project_issues",
+    description: "List project issues from synchronized GitHub data.",
+    parameters: Type.Object({
+      projectId: Type.Optional(Type.String()),
+      state: Type.Optional(Type.String()),
+      limit: Type.Optional(Type.Number({ minimum: 1, maximum: 100 }))
+    })
+  },
+  {
+    name: "get_run_status",
+    description: "Get detailed status for a run including recent events.",
+    parameters: Type.Object({
+      runId: Type.String()
+    })
+  },
+  {
+    name: "reconcile_project_github",
+    description: "Sync GitHub issues and pull requests for a project now.",
+    parameters: Type.Object({
+      projectId: Type.Optional(Type.String())
+    })
+  },
+  {
+    name: "redeploy_project",
+    description:
+      "Redeploy a project using its configured redeploy defaults. This requires explicit approval.",
+    parameters: Type.Object({
+      projectId: Type.Optional(Type.String()),
+      force: Type.Optional(Type.Boolean())
+    })
+  },
+  {
+    name: "cancel_run",
+    description: "Cancel an active run. This requires explicit approval.",
+    parameters: Type.Object({
+      runId: Type.String()
+    })
+  },
+  {
+    name: "execute_shell",
+    description: "Execute a shell command from the API workspace root. Requires explicit approval.",
+    parameters: Type.Object({
+      command: Type.String(),
+      cwd: Type.Optional(Type.String()),
+      timeoutSeconds: Type.Optional(Type.Number({ minimum: 5, maximum: 600 }))
+    })
+  }
+];
+
+const highRiskAgentTools = new Set<AgentToolName>([
+  "redeploy_project",
+  "cancel_run",
+  "execute_shell"
+]);
+
+function isHighRiskAgentTool(toolName: string): toolName is AgentToolName {
+  return highRiskAgentTools.has(toolName as AgentToolName);
+}
+
+function parseLimit(value: unknown, fallback: number, max = 100): number {
+  const parsed = Number.parseInt(String(value ?? fallback), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return Math.min(max, parsed);
+}
+
+function ensureWorkspacePath(cwd: string | undefined): string {
+  const root = process.cwd();
+  if (!cwd || cwd.trim().length === 0) {
+    return root;
+  }
+  const resolved = resolve(root, cwd);
+  if (resolved !== root && !resolved.startsWith(`${root}/`)) {
+    throw new ApiError(400, "cwd must stay within the API workspace");
+  }
+  return resolved;
+}
+
+async function executeAgentShellCommand(args: {
+  command: string;
+  cwd?: string;
+  timeoutSeconds?: number;
+}) {
+  const command = args.command.trim();
+  if (!command) {
+    throw new ApiError(400, "command is required");
+  }
+  const cwd = ensureWorkspacePath(args.cwd);
+  const timeoutSeconds = Math.max(
+    5,
+    Math.min(
+      600,
+      Number.parseInt(String(args.timeoutSeconds ?? AGENT_SHELL_TIMEOUT_SECONDS), 10) ||
+        AGENT_SHELL_TIMEOUT_SECONDS
+    )
+  );
+  const startedAt = Date.now();
+
+  try {
+    const result = await execFileAsync("bash", ["-lc", command], {
+      cwd,
+      timeout: timeoutSeconds * 1000,
+      maxBuffer: 4 * 1024 * 1024
+    });
+    return {
+      command,
+      cwd,
+      timeoutSeconds,
+      exitCode: 0,
+      stdout: clampAgentText(result.stdout ?? "", AGENT_SHELL_MAX_OUTPUT_CHARS),
+      stderr: clampAgentText(result.stderr ?? "", AGENT_SHELL_MAX_OUTPUT_CHARS),
+      durationMs: Date.now() - startedAt
+    };
+  } catch (error) {
+    const typed = error as { code?: number | string; stdout?: string; stderr?: string; message?: string };
+    throw new ApiError(
+      400,
+      `shell command failed (code=${String(typed.code ?? "unknown")}): ${summarizeMessageContent(typed.stderr ?? typed.message ?? "command error", 320)}`
+    );
+  }
+}
+
+async function queueSelfIterateImplementationRun(input: {
+  projectId: string;
+  attractorDefId: string;
+  environmentId?: string;
+  sourceBranch: string;
+  targetBranch: string;
+  force?: boolean;
+}): Promise<{
+  runId: string;
+  status: RunStatus;
+  sourcePlanningRunId: string;
+  sourceSpecBundleId: string;
+}> {
+  const project = await prisma.project.findUnique({ where: { id: input.projectId } });
+  if (!project) {
+    throw new ApiError(404, "project not found");
+  }
+
+  const attractorDef = await prisma.attractorDef.findUnique({ where: { id: input.attractorDefId } });
+  if (!attractorDef || attractorDef.projectId !== project.id) {
+    throw new ApiError(404, "attractor definition not found in project");
+  }
+  if (!attractorDef.active) {
+    throw new ApiError(409, "attractor definition is inactive");
+  }
+
+  let modelConfig: RunModelConfig;
+  try {
+    modelConfig = requireAttractorModelConfig({
+      modelConfig: attractorDef.modelConfig,
+      attractorName: attractorDef.name
+    });
+  } catch (error) {
+    throw new ApiError(409, error instanceof Error ? error.message : String(error));
+  }
+
+  const providerSecretExists = await hasEffectiveProviderSecret(project.id, modelConfig.provider);
+  if (!providerSecretExists) {
+    throw new ApiError(
+      409,
+      `Missing provider secret for ${modelConfig.provider}. Configure it in Project Secret or Global Secret UI first.`
+    );
+  }
+
+  let attractorSnapshot: { contentPath: string; contentVersion: number; contentSha256: string };
+  try {
+    attractorSnapshot = await resolveAttractorSnapshotForRun({
+      id: attractorDef.id,
+      name: attractorDef.name,
+      scope: attractorDef.scope,
+      contentPath: attractorDef.contentPath,
+      contentVersion: attractorDef.contentVersion
+    });
+  } catch (error) {
+    throw new ApiError(409, error instanceof Error ? error.message : String(error));
+  }
+
+  const latestPlanningRun = await prisma.run.findFirst({
+    where: {
+      projectId: project.id,
+      runType: RunType.planning,
+      status: RunStatus.SUCCEEDED,
+      specBundleId: { not: null }
+    },
+    orderBy: {
+      finishedAt: "desc"
+    }
+  });
+  if (!latestPlanningRun?.specBundleId) {
+    throw new ApiError(409, "no successful planning run with a spec bundle is available");
+  }
+
+  if (!input.force) {
+    const collision = await prisma.run.findFirst({
+      where: {
+        projectId: project.id,
+        runType: RunType.implementation,
+        targetBranch: input.targetBranch,
+        status: { in: [RunStatus.QUEUED, RunStatus.RUNNING] }
+      }
+    });
+    if (collision) {
+      throw new ApiError(
+        409,
+        `Branch collision: run ${collision.id} is already active on ${input.targetBranch}`
+      );
+    }
+  }
+
+  let resolvedEnvironment: { id: string; snapshot: RunExecutionEnvironment };
+  try {
+    resolvedEnvironment = await resolveRunEnvironment({
+      projectId: project.id,
+      explicitEnvironmentId: input.environmentId
+    });
+  } catch (error) {
+    throw new ApiError(409, error instanceof Error ? error.message : String(error));
+  }
+
+  const run = await prisma.run.create({
+    data: {
+      projectId: project.id,
+      attractorDefId: attractorDef.id,
+      attractorContentPath: attractorSnapshot.contentPath,
+      attractorContentVersion: attractorSnapshot.contentVersion,
+      attractorContentSha256: attractorSnapshot.contentSha256,
+      environmentId: resolvedEnvironment.id,
+      environmentSnapshot: resolvedEnvironment.snapshot as never,
+      runType: RunType.implementation,
+      sourceBranch: input.sourceBranch,
+      targetBranch: input.targetBranch,
+      status: RunStatus.QUEUED,
+      specBundleId: latestPlanningRun.specBundleId
+    }
+  });
+
+  await appendRunEvent(run.id, "RunQueued", {
+    runId: run.id,
+    runType: run.runType,
+    projectId: run.projectId,
+    targetBranch: run.targetBranch,
+    attractorSnapshot,
+    modelConfig,
+    environment: resolvedEnvironment.snapshot,
+    runnerImage: resolvedEnvironment.snapshot.runnerImage,
+    sourcePlanningRunId: latestPlanningRun.id,
+    sourceSpecBundleId: latestPlanningRun.specBundleId
+  });
+  await redis.lpush(runQueueKey(), run.id);
+
+  return {
+    runId: run.id,
+    status: run.status,
+    sourcePlanningRunId: latestPlanningRun.id,
+    sourceSpecBundleId: latestPlanningRun.specBundleId
+  };
+}
+
+async function executeRedeployFromProjectDefaults(input: {
+  projectId: string;
+  force?: boolean;
+}) {
+  const project = await prisma.project.findUnique({
+    where: { id: input.projectId }
+  });
+  if (!project) {
+    throw new ApiError(404, "project not found");
+  }
+  if (!project.redeployAttractorId) {
+    throw new ApiError(409, "project redeploy defaults are not configured (missing attractor)");
+  }
+  if (!project.redeploySourceBranch || !project.redeployTargetBranch) {
+    throw new ApiError(
+      409,
+      "project redeploy defaults are not configured (missing source/target branch)"
+    );
+  }
+
+  return queueSelfIterateImplementationRun({
+    projectId: project.id,
+    attractorDefId: project.redeployAttractorId,
+    sourceBranch: project.redeploySourceBranch,
+    targetBranch: project.redeployTargetBranch,
+    environmentId: project.redeployEnvironmentId ?? undefined,
+    force: input.force
+  });
+}
+
+async function cancelRunInternal(runId: string): Promise<{ runId: string; status: RunStatus }> {
+  const run = await prisma.run.findUnique({ where: { id: runId } });
+  if (!run) {
+    throw new ApiError(404, "run not found");
+  }
+  if (run.status !== RunStatus.QUEUED && run.status !== RunStatus.RUNNING) {
+    throw new ApiError(409, `run is already terminal (${run.status})`);
+  }
+
+  const updated = await prisma.run.update({
+    where: { id: run.id },
+    data: {
+      status: RunStatus.CANCELED,
+      finishedAt: new Date()
+    }
+  });
+  await redis.set(runCancelKey(run.id), "1", "EX", 7200);
+  await appendRunEvent(run.id, "RunCanceled", { runId: run.id });
+  if (run.runType === RunType.implementation) {
+    await redis.del(runLockKey(run.projectId, run.targetBranch));
+  }
+  return { runId: updated.id, status: updated.status };
+}
+
+async function executeReadAgentTool(
+  toolName: AgentToolName,
+  rawArgs: unknown,
+  session: { scope: AgentScope; projectId: string | null }
+): Promise<unknown> {
+  const args = asRecord(rawArgs);
+
+  if (toolName === "list_projects") {
+    const projects = await prisma.project.findMany({
+      orderBy: { createdAt: "desc" },
+      take: 200
+    });
+    return { projects };
+  }
+
+  if (toolName === "get_project_overview") {
+    const projectId = resolveAgentProjectId(session, args.projectId);
+    const project = await prisma.project.findUnique({
+      where: { id: projectId }
+    });
+    if (!project) {
+      throw new ApiError(404, "project not found");
+    }
+    const [runCount, activeRunCount, issueCount, pullCount, attractorCount] = await Promise.all([
+      prisma.run.count({ where: { projectId: project.id } }),
+      prisma.run.count({
+        where: { projectId: project.id, status: { in: [RunStatus.QUEUED, RunStatus.RUNNING] } }
+      }),
+      prisma.gitHubIssue.count({ where: { projectId: project.id } }),
+      prisma.gitHubPullRequest.count({ where: { projectId: project.id } }),
+      prisma.attractorDef.count({ where: { projectId: project.id, active: true } })
+    ]);
+    return {
+      project,
+      counts: {
+        runs: runCount,
+        activeRuns: activeRunCount,
+        issues: issueCount,
+        pulls: pullCount,
+        activeAttractors: attractorCount
+      }
+    };
+  }
+
+  if (toolName === "list_project_runs") {
+    const projectId = resolveAgentProjectId(session, args.projectId);
+    const take = parseLimit(args.limit, 20, 100);
+    const status = typeof args.status === "string" ? args.status.trim().toUpperCase() : "";
+    if (
+      status.length > 0 &&
+      ![
+        RunStatus.QUEUED,
+        RunStatus.RUNNING,
+        RunStatus.SUCCEEDED,
+        RunStatus.FAILED,
+        RunStatus.CANCELED,
+        RunStatus.TIMEOUT
+      ].includes(status as RunStatus)
+    ) {
+      throw new ApiError(400, `invalid run status filter: ${status}`);
+    }
+    const runs = await prisma.run.findMany({
+      where: {
+        projectId,
+        ...(status.length > 0 ? { status: status as RunStatus } : {})
+      },
+      include: {
+        githubIssue: true,
+        githubPullRequest: true
+      },
+      orderBy: { createdAt: "desc" },
+      take
+    });
+    return { runs };
+  }
+
+  if (toolName === "list_project_pulls") {
+    const projectId = resolveAgentProjectId(session, args.projectId);
+    const take = parseLimit(args.limit, 20, 100);
+    const state = typeof args.state === "string" ? args.state.trim().toLowerCase() : "all";
+    const pulls = await prisma.gitHubPullRequest.findMany({
+      where: {
+        projectId,
+        ...(state === "all" ? {} : { state })
+      },
+      orderBy: { openedAt: "desc" },
+      take
+    });
+    return { pulls };
+  }
+
+  if (toolName === "list_project_issues") {
+    const projectId = resolveAgentProjectId(session, args.projectId);
+    const take = parseLimit(args.limit, 20, 100);
+    const state = typeof args.state === "string" ? args.state.trim().toLowerCase() : "all";
+    const issues = await prisma.gitHubIssue.findMany({
+      where: {
+        projectId,
+        ...(state === "all" ? {} : { state })
+      },
+      orderBy: { updatedAt: "desc" },
+      take
+    });
+    return { issues };
+  }
+
+  if (toolName === "get_run_status") {
+    const runId = String(args.runId ?? "").trim();
+    if (!runId) {
+      throw new ApiError(400, "runId is required");
+    }
+    const run = await prisma.run.findUnique({
+      where: { id: runId },
+      include: {
+        githubIssue: true,
+        githubPullRequest: true,
+        events: {
+          orderBy: { ts: "desc" },
+          take: 30
+        }
+      }
+    });
+    if (!run) {
+      throw new ApiError(404, "run not found");
+    }
+    return { run };
+  }
+
+  if (toolName === "reconcile_project_github") {
+    const projectId = resolveAgentProjectId(session, args.projectId);
+    const result = await reconcileProjectGitHub(projectId);
+    return result;
+  }
+
+  throw new ApiError(400, `unsupported read tool: ${toolName}`);
+}
+
+function summarizePendingAgentAction(toolName: AgentToolName, rawArgs: unknown): string {
+  const args = asRecord(rawArgs);
+  if (toolName === "redeploy_project") {
+    return `Redeploy project ${String(args.projectId ?? "").trim() || "(session project)"}`;
+  }
+  if (toolName === "cancel_run") {
+    return `Cancel run ${String(args.runId ?? "").trim() || "(unknown run)"}`;
+  }
+  if (toolName === "execute_shell") {
+    return `Execute shell command: ${summarizeMessageContent(String(args.command ?? ""), 120)}`;
+  }
+  return `Execute action ${toolName}`;
+}
+
+async function executeApprovedAgentAction(action: {
+  type: string;
+  argsJson: unknown;
+}, session: {
+  scope: AgentScope;
+  projectId: string | null;
+}) {
+  const args = asRecord(action.argsJson);
+  if (action.type === "redeploy_project") {
+    const projectId = resolveAgentProjectId(session, args.projectId);
+    return executeRedeployFromProjectDefaults({
+      projectId,
+      force: args.force === true
+    });
+  }
+  if (action.type === "cancel_run") {
+    const runId = String(args.runId ?? "").trim();
+    if (!runId) {
+      throw new ApiError(400, "cancel_run requires runId");
+    }
+    return cancelRunInternal(runId);
+  }
+  if (action.type === "execute_shell") {
+    const command = String(args.command ?? "").trim();
+    if (!command) {
+      throw new ApiError(400, "execute_shell requires command");
+    }
+    return executeAgentShellCommand({
+      command,
+      cwd: typeof args.cwd === "string" ? args.cwd : undefined,
+      timeoutSeconds: Number.parseInt(String(args.timeoutSeconds ?? ""), 10) || undefined
+    });
+  }
+  throw new ApiError(400, `unsupported action type: ${action.type}`);
+}
+
+async function runAgentTurn(input: {
+  session: {
+    id: string;
+    scope: AgentScope;
+    projectId: string | null;
+    title: string;
+  };
+  userMessage: string;
+  actorEmail: string | null;
+}): Promise<{
+  assistantText: string;
+  usage: unknown;
+  pendingActions: string[];
+}> {
+  const historyMessages = await prisma.agentMessage.findMany({
+    where: { sessionId: input.session.id },
+    orderBy: { createdAt: "desc" },
+    take: 30
+  });
+  const history = [...historyMessages].reverse();
+  const historyPrompt = toAgentHistoryPrompt(
+    history.map((message) => ({
+      role: message.role,
+      content: message.content,
+      createdAt: message.createdAt
+    }))
+  );
+
+  const scopeLine =
+    input.session.scope === AgentScope.PROJECT
+      ? `PROJECT session for projectId=${input.session.projectId}`
+      : "GLOBAL session";
+  const systemPrompt = [
+    "You are the Attractor Factory assistant.",
+    "Use tools for factual questions about runs, PRs, issues, and project state.",
+    "For mutating actions, call the tool and the backend will require explicit approval.",
+    "Keep responses concise and operationally clear.",
+    `Session scope: ${scopeLine}.`
+  ].join(" ");
+
+  const context: Context = {
+    systemPrompt,
+    messages: [
+      {
+        role: "user",
+        content: `Recent chat history:\n${historyPrompt}\n\nUser message:\n${input.userMessage}`,
+        timestamp: Date.now()
+      }
+    ],
+    tools: agentTools
+  };
+
+  let lastMessage: AssistantMessage | null = null;
+  const pendingActionIds: string[] = [];
+  for (let round = 0; round < AGENT_MAX_TOOL_ROUNDS; round += 1) {
+    const response = await completeSimple(agentModel, context, {
+      reasoning: agentReasoningLevel
+    });
+    lastMessage = response;
+    context.messages.push(response);
+
+    const toolCalls = response.content.filter((block): block is ToolCall => block.type === "toolCall");
+    if (toolCalls.length === 0) {
+      break;
+    }
+
+    for (const toolCall of toolCalls) {
+      let args: unknown;
+      try {
+        args = validateToolCall(agentTools, toolCall);
+      } catch (error) {
+        context.messages.push({
+          role: "toolResult",
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                error: error instanceof Error ? error.message : String(error)
+              })
+            }
+          ],
+          isError: true,
+          timestamp: Date.now()
+        });
+        continue;
+      }
+
+      const toolName = toolCall.name as AgentToolName;
+      if (isHighRiskAgentTool(toolName)) {
+        let actionArgs = args;
+        if (toolName === "redeploy_project") {
+          const actionArgsRecord = asRecord(args);
+          const explicitProjectId = String(actionArgsRecord.projectId ?? "").trim();
+          if (!explicitProjectId && input.session.scope === AgentScope.PROJECT && input.session.projectId) {
+            actionArgs = {
+              ...actionArgsRecord,
+              projectId: input.session.projectId
+            };
+          }
+        }
+
+        const action = await prisma.agentAction.create({
+          data: {
+            sessionId: input.session.id,
+            type: toolName,
+            risk: AgentActionRisk.HIGH,
+            status: AgentActionStatus.PENDING,
+            summary: summarizePendingAgentAction(toolName, actionArgs),
+            argsJson: (actionArgs ?? {}) as never,
+            requestedByEmail: input.actorEmail
+          }
+        });
+        await touchAgentSession(input.session.id);
+        pendingActionIds.push(action.id);
+        context.messages.push({
+          role: "toolResult",
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                pendingApproval: true,
+                actionId: action.id,
+                summary: action.summary
+              })
+            }
+          ],
+          isError: false,
+          timestamp: Date.now()
+        });
+        continue;
+      }
+
+      try {
+        const result = await executeReadAgentTool(toolName, args, input.session);
+        context.messages.push({
+          role: "toolResult",
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result)
+            }
+          ],
+          isError: false,
+          timestamp: Date.now()
+        });
+      } catch (error) {
+        context.messages.push({
+          role: "toolResult",
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                error: error instanceof Error ? error.message : String(error)
+              })
+            }
+          ],
+          isError: true,
+          timestamp: Date.now()
+        });
+      }
+    }
+  }
+
+  const assistantText = lastMessage
+    ? textFromAssistantMessage(lastMessage)
+    : "I could not complete that request.";
+  return {
+    assistantText:
+      assistantText.length > 0
+        ? assistantText
+        : "I reviewed the request and queued the required tool actions.",
+    usage: lastMessage?.usage ?? null,
+    pendingActions: pendingActionIds
+  };
+}
+
 function sendError(res: express.Response, status: number, error: string) {
   res.status(status).json({ error });
 }
@@ -2646,6 +3534,75 @@ app.post("/api/projects/:projectId/environment", async (req, res) => {
   });
 
   res.json(updatedProject);
+});
+
+const patchProjectRedeployDefaultsSchema = z
+  .object({
+    redeployAttractorId: z.string().min(1).nullable().optional(),
+    redeploySourceBranch: z.string().min(1).nullable().optional(),
+    redeployTargetBranch: z.string().min(1).nullable().optional(),
+    redeployEnvironmentId: z.string().min(1).nullable().optional()
+  })
+  .refine((value) => Object.keys(value).length > 0, {
+    message: "at least one field is required"
+  });
+
+app.patch("/api/projects/:projectId/redeploy-defaults", async (req, res) => {
+  const input = patchProjectRedeployDefaultsSchema.safeParse(req.body);
+  if (!input.success) {
+    return sendError(res, 400, input.error.message);
+  }
+
+  const project = await prisma.project.findUnique({
+    where: { id: req.params.projectId }
+  });
+  if (!project) {
+    return sendError(res, 404, "project not found");
+  }
+
+  if (input.data.redeployAttractorId !== undefined && input.data.redeployAttractorId !== null) {
+    const attractor = await prisma.attractorDef.findUnique({
+      where: { id: input.data.redeployAttractorId }
+    });
+    if (!attractor || attractor.projectId !== project.id) {
+      return sendError(res, 404, "redeploy attractor not found in project");
+    }
+    if (!attractor.active) {
+      return sendError(res, 409, "redeploy attractor is inactive");
+    }
+  }
+
+  if (input.data.redeployEnvironmentId !== undefined && input.data.redeployEnvironmentId !== null) {
+    const environment = await prisma.environment.findUnique({
+      where: { id: input.data.redeployEnvironmentId }
+    });
+    if (!environment) {
+      return sendError(res, 404, "redeploy environment not found");
+    }
+    if (!environment.active) {
+      return sendError(res, 409, `environment ${environment.name} is inactive`);
+    }
+  }
+
+  const updated = await prisma.project.update({
+    where: { id: project.id },
+    data: {
+      ...(input.data.redeployAttractorId !== undefined
+        ? { redeployAttractorId: input.data.redeployAttractorId }
+        : {}),
+      ...(input.data.redeploySourceBranch !== undefined
+        ? { redeploySourceBranch: toNullableText(input.data.redeploySourceBranch ?? undefined) }
+        : {}),
+      ...(input.data.redeployTargetBranch !== undefined
+        ? { redeployTargetBranch: toNullableText(input.data.redeployTargetBranch ?? undefined) }
+        : {}),
+      ...(input.data.redeployEnvironmentId !== undefined
+        ? { redeployEnvironmentId: input.data.redeployEnvironmentId }
+        : {})
+    }
+  });
+
+  res.json(updated);
 });
 
 const bootstrapSelfSchema = z.object({
@@ -4689,133 +5646,369 @@ app.post("/api/projects/:projectId/self-iterate", async (req, res) => {
     return sendError(res, 400, input.error.message);
   }
 
-  const project = await prisma.project.findUnique({ where: { id: req.params.projectId } });
-  if (!project) {
-    return sendError(res, 404, "project not found");
-  }
-
-  const attractorDef = await prisma.attractorDef.findUnique({ where: { id: input.data.attractorDefId } });
-  if (!attractorDef || attractorDef.projectId !== project.id) {
-    return sendError(res, 404, "attractor definition not found in project");
-  }
-  if (!attractorDef.active) {
-    return sendError(res, 409, "attractor definition is inactive");
-  }
-  let modelConfig: RunModelConfig;
   try {
-    modelConfig = requireAttractorModelConfig({
-      modelConfig: attractorDef.modelConfig,
-      attractorName: attractorDef.name
-    });
-  } catch (error) {
-    return sendError(res, 409, error instanceof Error ? error.message : String(error));
-  }
-
-  const providerSecretExists = await hasEffectiveProviderSecret(project.id, modelConfig.provider);
-  if (!providerSecretExists) {
-    return sendError(
-      res,
-      409,
-      `Missing provider secret for ${modelConfig.provider}. Configure it in Project Secret or Global Secret UI first.`
-    );
-  }
-
-  let attractorSnapshot;
-  try {
-    attractorSnapshot = await resolveAttractorSnapshotForRun({
-      id: attractorDef.id,
-      name: attractorDef.name,
-      scope: attractorDef.scope,
-      contentPath: attractorDef.contentPath,
-      contentVersion: attractorDef.contentVersion
-    });
-  } catch (error) {
-    return sendError(res, 409, error instanceof Error ? error.message : String(error));
-  }
-
-  const latestPlanningRun = await prisma.run.findFirst({
-    where: {
-      projectId: project.id,
-      runType: RunType.planning,
-      status: RunStatus.SUCCEEDED,
-      specBundleId: { not: null }
-    },
-    orderBy: {
-      finishedAt: "desc"
-    }
-  });
-
-  if (!latestPlanningRun?.specBundleId) {
-    return sendError(res, 409, "no successful planning run with a spec bundle is available");
-  }
-
-  if (!input.data.force) {
-    const collision = await prisma.run.findFirst({
-      where: {
-        projectId: project.id,
-        runType: RunType.implementation,
-        targetBranch: input.data.targetBranch,
-        status: { in: [RunStatus.QUEUED, RunStatus.RUNNING] }
-      }
-    });
-
-    if (collision) {
-      return sendError(
-        res,
-        409,
-        `Branch collision: run ${collision.id} is already active on ${input.data.targetBranch}`
-      );
-    }
-  }
-
-  let resolvedEnvironment;
-  try {
-    resolvedEnvironment = await resolveRunEnvironment({
-      projectId: project.id,
-      explicitEnvironmentId: input.data.environmentId
-    });
-  } catch (error) {
-    return sendError(res, 409, error instanceof Error ? error.message : String(error));
-  }
-
-  const run = await prisma.run.create({
-    data: {
-      projectId: project.id,
-      attractorDefId: attractorDef.id,
-      attractorContentPath: attractorSnapshot.contentPath,
-      attractorContentVersion: attractorSnapshot.contentVersion,
-      attractorContentSha256: attractorSnapshot.contentSha256,
-      environmentId: resolvedEnvironment.id,
-      environmentSnapshot: resolvedEnvironment.snapshot as never,
-      runType: RunType.implementation,
+    const queued = await queueSelfIterateImplementationRun({
+      projectId: req.params.projectId,
+      attractorDefId: input.data.attractorDefId,
+      environmentId: input.data.environmentId,
       sourceBranch: input.data.sourceBranch,
       targetBranch: input.data.targetBranch,
-      status: RunStatus.QUEUED,
-      specBundleId: latestPlanningRun.specBundleId
+      force: input.data.force
+    });
+    res.status(201).json(queued);
+  } catch (error) {
+    if (error instanceof ApiError) {
+      return sendError(res, error.status, error.message);
+    }
+    return sendError(res, 500, error instanceof Error ? error.message : String(error));
+  }
+});
+
+const createAgentSessionSchema = z.object({
+  scope: z.enum(["GLOBAL", "PROJECT"]),
+  projectId: z.string().min(1).optional(),
+  title: z.string().min(1).max(120).optional()
+});
+
+const postAgentMessageSchema = z.object({
+  content: z.string().min(1).max(20000)
+});
+
+app.get("/api/agent/sessions", async (req, res) => {
+  const scope = String(req.query.scope ?? "PROJECT").trim().toUpperCase();
+  if (scope !== AgentScope.GLOBAL && scope !== AgentScope.PROJECT) {
+    return sendError(res, 400, "scope must be GLOBAL or PROJECT");
+  }
+  const projectId = String(req.query.projectId ?? "").trim();
+  if (scope === AgentScope.PROJECT && !projectId) {
+    return sendError(res, 400, "projectId is required for PROJECT scope");
+  }
+  const take = parseLimit(req.query.limit, 50, 200);
+
+  const sessions = await prisma.agentSession.findMany({
+    where: {
+      archivedAt: null,
+      scope: scope as AgentScope,
+      ...(scope === AgentScope.PROJECT ? { projectId } : {})
+    },
+    include: {
+      messages: {
+        orderBy: { createdAt: "desc" },
+        take: 1
+      },
+      actions: {
+        where: { status: AgentActionStatus.PENDING },
+        select: { id: true }
+      }
+    },
+    orderBy: { updatedAt: "desc" },
+    take
+  });
+
+  res.json({
+    sessions: sessions.map((session) => ({
+      ...session,
+      lastMessagePreview: session.messages[0]?.content
+        ? summarizeMessageContent(session.messages[0].content)
+        : null,
+      pendingActionCount: session.actions.length
+    }))
+  });
+});
+
+app.post("/api/agent/sessions", async (req, res) => {
+  const input = createAgentSessionSchema.safeParse(req.body);
+  if (!input.success) {
+    return sendError(res, 400, input.error.message);
+  }
+  if (input.data.scope === AgentScope.PROJECT && !input.data.projectId) {
+    return sendError(res, 400, "projectId is required for PROJECT scope");
+  }
+
+  if (input.data.scope === AgentScope.PROJECT) {
+    const project = await prisma.project.findUnique({ where: { id: input.data.projectId } });
+    if (!project) {
+      return sendError(res, 404, "project not found");
+    }
+  }
+
+  const actorEmail = getRequestActorEmail(req);
+  const session = await prisma.agentSession.create({
+    data: {
+      scope: input.data.scope as AgentScope,
+      projectId: input.data.scope === AgentScope.PROJECT ? input.data.projectId : null,
+      title: input.data.title?.trim() || AGENT_DEFAULT_SESSION_TITLE,
+      createdByEmail: actorEmail
+    }
+  });
+  res.status(201).json({ session });
+});
+
+app.get("/api/agent/sessions/:sessionId", async (req, res) => {
+  const session = await prisma.agentSession.findUnique({
+    where: { id: req.params.sessionId },
+    include: {
+      actions: {
+        where: { status: AgentActionStatus.PENDING },
+        select: { id: true }
+      }
+    }
+  });
+  if (!session || session.archivedAt) {
+    return sendError(res, 404, "agent session not found");
+  }
+  res.json({
+    session: {
+      ...session,
+      pendingActionCount: session.actions.length
+    }
+  });
+});
+
+app.delete("/api/agent/sessions/:sessionId", async (req, res) => {
+  const session = await ensureAgentSession(req.params.sessionId).catch((error) => {
+    if (error instanceof ApiError) {
+      sendError(res, error.status, error.message);
+      return null;
+    }
+    sendError(res, 500, error instanceof Error ? error.message : String(error));
+    return null;
+  });
+  if (!session) {
+    return;
+  }
+  await prisma.agentSession.update({
+    where: { id: session.id },
+    data: {
+      archivedAt: new Date()
+    }
+  });
+  res.status(204).send();
+});
+
+app.get("/api/agent/sessions/:sessionId/messages", async (req, res) => {
+  let session;
+  try {
+    session = await ensureAgentSession(req.params.sessionId);
+  } catch (error) {
+    if (error instanceof ApiError) {
+      return sendError(res, error.status, error.message);
+    }
+    return sendError(res, 500, error instanceof Error ? error.message : String(error));
+  }
+
+  const take = parseLimit(req.query.limit, 200, 500);
+  const messages = await prisma.agentMessage.findMany({
+    where: { sessionId: session.id },
+    orderBy: { createdAt: "asc" },
+    take
+  });
+  const actions = await prisma.agentAction.findMany({
+    where: { sessionId: session.id },
+    orderBy: [{ requestedAt: "desc" }],
+    take: 200
+  });
+
+  res.json({ messages, actions });
+});
+
+app.post("/api/agent/sessions/:sessionId/messages", async (req, res) => {
+  const input = postAgentMessageSchema.safeParse(req.body);
+  if (!input.success) {
+    return sendError(res, 400, input.error.message);
+  }
+
+  let session;
+  try {
+    session = await ensureAgentSession(req.params.sessionId);
+  } catch (error) {
+    if (error instanceof ApiError) {
+      return sendError(res, error.status, error.message);
+    }
+    return sendError(res, 500, error instanceof Error ? error.message : String(error));
+  }
+
+  const actorEmail = getRequestActorEmail(req);
+  const userMessage = await prisma.agentMessage.create({
+    data: {
+      sessionId: session.id,
+      role: AgentMessageRole.USER,
+      content: input.data.content
+    }
+  });
+  await touchAgentSession(session.id);
+
+  let turnResult: { assistantText: string; usage: unknown; pendingActions: string[] };
+  try {
+    turnResult = await runAgentTurn({
+      session: {
+        id: session.id,
+        scope: session.scope,
+        projectId: session.projectId,
+        title: session.title
+      },
+      userMessage: input.data.content,
+      actorEmail
+    });
+  } catch (error) {
+    const failedAssistant = await prisma.agentMessage.create({
+      data: {
+        sessionId: session.id,
+        role: AgentMessageRole.ASSISTANT,
+        content: `I hit an error while processing that request: ${error instanceof Error ? error.message : String(error)}`
+      }
+    });
+    await touchAgentSession(session.id);
+    return res.status(500).json({
+      userMessage,
+      assistantMessage: failedAssistant,
+      pendingActions: []
+    });
+  }
+
+  const assistantMessage = await prisma.agentMessage.create({
+    data: {
+      sessionId: session.id,
+      role: AgentMessageRole.ASSISTANT,
+      content: turnResult.assistantText,
+      tokenUsageJson: turnResult.usage as never
+    }
+  });
+  if (turnResult.pendingActions.length > 0) {
+    await prisma.agentAction.updateMany({
+      where: { id: { in: turnResult.pendingActions } },
+      data: { messageId: assistantMessage.id }
+    });
+  }
+  await touchAgentSession(session.id);
+
+  const pendingActions = await prisma.agentAction.findMany({
+    where: {
+      sessionId: session.id,
+      status: AgentActionStatus.PENDING
+    },
+    orderBy: { requestedAt: "desc" }
+  });
+
+  res.status(201).json({
+    userMessage,
+    assistantMessage,
+    pendingActions
+  });
+});
+
+app.post("/api/agent/sessions/:sessionId/actions/:actionId/approve", async (req, res) => {
+  let session;
+  try {
+    session = await ensureAgentSession(req.params.sessionId);
+  } catch (error) {
+    if (error instanceof ApiError) {
+      return sendError(res, error.status, error.message);
+    }
+    return sendError(res, 500, error instanceof Error ? error.message : String(error));
+  }
+
+  const action = await prisma.agentAction.findFirst({
+    where: {
+      id: req.params.actionId,
+      sessionId: session.id
+    }
+  });
+  if (!action) {
+    return sendError(res, 404, "action not found");
+  }
+  if (action.status !== AgentActionStatus.PENDING) {
+    return sendError(res, 409, `action is already ${action.status}`);
+  }
+
+  const actorEmail = getRequestActorEmail(req);
+  let updatedAction;
+  let assistantContent = "";
+  try {
+    const result = await executeApprovedAgentAction({
+      type: action.type,
+      argsJson: action.argsJson
+    }, {
+      scope: session.scope,
+      projectId: session.projectId
+    });
+    updatedAction = await prisma.agentAction.update({
+      where: { id: action.id },
+      data: {
+        status: AgentActionStatus.EXECUTED,
+        resultJson: result as never,
+        resolvedByEmail: actorEmail,
+        resolvedAt: new Date()
+      }
+    });
+    assistantContent = `Approved and executed: ${action.summary}`;
+  } catch (error) {
+    updatedAction = await prisma.agentAction.update({
+      where: { id: action.id },
+      data: {
+        status: AgentActionStatus.FAILED,
+        error: error instanceof Error ? error.message : String(error),
+        resolvedByEmail: actorEmail,
+        resolvedAt: new Date()
+      }
+    });
+    assistantContent = `Execution failed for ${action.summary}: ${updatedAction.error ?? "unknown error"}`;
+  }
+
+  const assistantMessage = await prisma.agentMessage.create({
+    data: {
+      sessionId: session.id,
+      role: AgentMessageRole.ASSISTANT,
+      content: assistantContent
+    }
+  });
+  await touchAgentSession(session.id);
+  res.json({ action: updatedAction, assistantMessage });
+});
+
+app.post("/api/agent/sessions/:sessionId/actions/:actionId/reject", async (req, res) => {
+  let session;
+  try {
+    session = await ensureAgentSession(req.params.sessionId);
+  } catch (error) {
+    if (error instanceof ApiError) {
+      return sendError(res, error.status, error.message);
+    }
+    return sendError(res, 500, error instanceof Error ? error.message : String(error));
+  }
+
+  const action = await prisma.agentAction.findFirst({
+    where: {
+      id: req.params.actionId,
+      sessionId: session.id
+    }
+  });
+  if (!action) {
+    return sendError(res, 404, "action not found");
+  }
+  if (action.status !== AgentActionStatus.PENDING) {
+    return sendError(res, 409, `action is already ${action.status}`);
+  }
+
+  const actorEmail = getRequestActorEmail(req);
+  const updatedAction = await prisma.agentAction.update({
+    where: { id: action.id },
+    data: {
+      status: AgentActionStatus.REJECTED,
+      resolvedByEmail: actorEmail,
+      resolvedAt: new Date()
     }
   });
 
-  await appendRunEvent(run.id, "RunQueued", {
-    runId: run.id,
-    runType: run.runType,
-    projectId: run.projectId,
-    targetBranch: run.targetBranch,
-    attractorSnapshot,
-    modelConfig,
-    environment: resolvedEnvironment.snapshot,
-    runnerImage: resolvedEnvironment.snapshot.runnerImage,
-    sourcePlanningRunId: latestPlanningRun.id,
-    sourceSpecBundleId: latestPlanningRun.specBundleId
+  const assistantMessage = await prisma.agentMessage.create({
+    data: {
+      sessionId: session.id,
+      role: AgentMessageRole.ASSISTANT,
+      content: `Rejected: ${action.summary}`
+    }
   });
-
-  await redis.lpush(runQueueKey(), run.id);
-
-  res.status(201).json({
-    runId: run.id,
-    status: run.status,
-    sourcePlanningRunId: latestPlanningRun.id,
-    sourceSpecBundleId: latestPlanningRun.specBundleId
-  });
+  await touchAgentSession(session.id);
+  res.json({ action: updatedAction, assistantMessage });
 });
 
 const runReviewChecklistSchema = z.object({

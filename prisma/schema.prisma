@@ -56,6 +56,29 @@ enum TaskTemplateLaunchMode {
   REPLAY
 }
 
+enum AgentScope {
+  GLOBAL
+  PROJECT
+}
+
+enum AgentMessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+
+enum AgentActionStatus {
+  PENDING
+  EXECUTED
+  REJECTED
+  FAILED
+}
+
+enum AgentActionRisk {
+  LOW
+  HIGH
+}
+
 model Project {
   id                   String         @id @default(cuid())
   name                 String
@@ -64,6 +87,10 @@ model Project {
   repoFullName         String?
   defaultBranch        String?
   defaultEnvironmentId String?
+  redeployAttractorId  String?
+  redeploySourceBranch String?
+  redeployTargetBranch String?
+  redeployEnvironmentId String?
   createdAt            DateTime       @default(now())
   updatedAt            DateTime       @updatedAt
   secrets              ProjectSecret[]
@@ -71,12 +98,17 @@ model Project {
   runs                 Run[]
   taskTemplates        TaskTemplate[]
   taskTemplateEvents   TaskTemplateEventLedger[]
+  agentSessions        AgentSession[]
   githubIssues         GitHubIssue[]
   githubPullRequests   GitHubPullRequest[]
   githubSyncState      GitHubSyncState?
   defaultEnvironment   Environment?   @relation("ProjectDefaultEnvironment", fields: [defaultEnvironmentId], references: [id], onDelete: SetNull)
+  redeployAttractor    AttractorDef?  @relation("ProjectRedeployAttractor", fields: [redeployAttractorId], references: [id], onDelete: SetNull)
+  redeployEnvironment  Environment?   @relation("ProjectRedeployEnvironment", fields: [redeployEnvironmentId], references: [id], onDelete: SetNull)
 
   @@index([defaultEnvironmentId])
+  @@index([redeployAttractorId])
+  @@index([redeployEnvironmentId])
 }
 
 model GlobalSecret {
@@ -152,6 +184,7 @@ model AttractorDef {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
   project        Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  redeployForProjects Project[] @relation("ProjectRedeployAttractor")
   runs           Run[]
   versions       AttractorDefVersion[]
 
@@ -334,7 +367,63 @@ model Environment {
   createdAt          DateTime        @default(now())
   updatedAt          DateTime        @updatedAt
   defaultForProjects Project[]       @relation("ProjectDefaultEnvironment")
+  redeployForProjects Project[]      @relation("ProjectRedeployEnvironment")
   runs               Run[]
+}
+
+model AgentSession {
+  id            String      @id @default(cuid())
+  scope         AgentScope
+  projectId     String?
+  title         String
+  createdByEmail String?
+  archivedAt    DateTime?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  project       Project?    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  messages      AgentMessage[]
+  actions       AgentAction[]
+
+  @@index([scope, projectId, updatedAt])
+  @@index([projectId, createdAt])
+}
+
+model AgentMessage {
+  id            String           @id @default(cuid())
+  sessionId     String
+  role          AgentMessageRole
+  content       String
+  partsJson     Json?
+  tokenUsageJson Json?
+  createdAt     DateTime         @default(now())
+  session       AgentSession     @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  actions       AgentAction[]
+
+  @@index([sessionId, createdAt])
+}
+
+model AgentAction {
+  id              String            @id @default(cuid())
+  sessionId       String
+  messageId       String?
+  type            String
+  risk            AgentActionRisk
+  status          AgentActionStatus @default(PENDING)
+  summary         String
+  argsJson        Json
+  resultJson      Json?
+  error           String?
+  requestedByEmail String?
+  resolvedByEmail String?
+  requestedAt     DateTime          @default(now())
+  resolvedAt      DateTime?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  session         AgentSession      @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  message         AgentMessage?     @relation(fields: [messageId], references: [id], onDelete: SetNull)
+
+  @@index([sessionId, status, requestedAt])
+  @@index([messageId])
 }
 
 model SpecBundle {

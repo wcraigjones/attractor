@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 
 import { AppShell } from "./components/layout/app-shell";
+import { GlobalAgentChatPage, ProjectAgentChatPage } from "./pages/agent-chat-page";
 import { ArtifactViewerPage } from "./pages/artifact-viewer-page";
 import { GlobalAttractorStudioPage, ProjectAttractorStudioPage } from "./pages/attractor-studio-page";
 import { DashboardPage } from "./pages/dashboard-page";
@@ -32,6 +33,7 @@ export function App() {
         <Route path="attractors/global" element={<GlobalAttractorsPage />} />
         <Route path="attractors/global/:attractorId" element={<GlobalAttractorStudioPage />} />
         <Route path="task-templates/global" element={<GlobalTaskTemplatesPage />} />
+        <Route path="chat" element={<GlobalAgentChatPage />} />
         <Route path="secrets/global" element={<GlobalSecretsPage />} />
         <Route path="projects/:projectId" element={<ProjectOverviewPage />} />
         <Route path="projects/:projectId/environments" element={<ProjectEnvironmentsPage />} />
@@ -39,6 +41,7 @@ export function App() {
         <Route path="projects/:projectId/attractors" element={<ProjectAttractorsPage />} />
         <Route path="projects/:projectId/attractors/:attractorId" element={<ProjectAttractorStudioPage />} />
         <Route path="projects/:projectId/task-templates" element={<ProjectTaskTemplatesPage />} />
+        <Route path="projects/:projectId/chat" element={<ProjectAgentChatPage />} />
         <Route path="projects/:projectId/github/issues" element={<ProjectGitHubIssuesPage />} />
         <Route path="projects/:projectId/github/issues/:issueNumber" element={<ProjectGitHubIssueDetailPage />} />
         <Route path="projects/:projectId/github/pulls" element={<ProjectGitHubPrQueuePage />} />

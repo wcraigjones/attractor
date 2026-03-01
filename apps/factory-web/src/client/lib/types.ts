@@ -5,6 +5,10 @@ export type EnvironmentKind = "KUBERNETES_JOB";
 export type RunQuestionStatus = "PENDING" | "ANSWERED" | "TIMEOUT";
 export type TaskTemplateEnvironmentMode = "PROJECT_DEFAULT" | "NAMED";
 export type TaskTemplateLaunchMode = "MANUAL" | "SCHEDULE" | "EVENT" | "REPLAY";
+export type AgentScope = "GLOBAL" | "PROJECT";
+export type AgentMessageRole = "USER" | "ASSISTANT" | "SYSTEM";
+export type AgentActionStatus = "PENDING" | "EXECUTED" | "REJECTED" | "FAILED";
+export type AgentActionRisk = "LOW" | "HIGH";
 export type TaskTemplateTriggerEvent =
   | "GITHUB_ISSUE_OPENED"
   | "GITHUB_ISSUE_REOPENED"
@@ -99,6 +103,52 @@ export interface Project {
   repoFullName: string | null;
   defaultBranch: string | null;
   defaultEnvironmentId: string | null;
+  redeployAttractorId: string | null;
+  redeploySourceBranch: string | null;
+  redeployTargetBranch: string | null;
+  redeployEnvironmentId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentSession {
+  id: string;
+  scope: AgentScope;
+  projectId: string | null;
+  title: string;
+  createdByEmail: string | null;
+  archivedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  lastMessagePreview?: string | null;
+  pendingActionCount?: number;
+}
+
+export interface AgentMessage {
+  id: string;
+  sessionId: string;
+  role: AgentMessageRole;
+  content: string;
+  partsJson: unknown | null;
+  tokenUsageJson: unknown | null;
+  createdAt: string;
+}
+
+export interface AgentAction {
+  id: string;
+  sessionId: string;
+  messageId: string | null;
+  type: string;
+  risk: AgentActionRisk;
+  status: AgentActionStatus;
+  summary: string;
+  argsJson: unknown;
+  resultJson: unknown | null;
+  error: string | null;
+  requestedByEmail: string | null;
+  resolvedByEmail: string | null;
+  requestedAt: string;
+  resolvedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }

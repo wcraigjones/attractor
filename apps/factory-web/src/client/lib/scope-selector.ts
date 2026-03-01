@@ -21,12 +21,17 @@ export function isGlobalTaskTemplatesPath(pathname: string): boolean {
   return pathname === "/task-templates/global" || pathname.startsWith("/task-templates/global/");
 }
 
+export function isGlobalChatPath(pathname: string): boolean {
+  return pathname === "/chat" || pathname.startsWith("/chat/");
+}
+
 export function isGlobalScopePath(pathname: string): boolean {
   return (
     isGlobalSecretsPath(pathname) ||
     isGlobalAttractorsPath(pathname) ||
     isGlobalEnvironmentsPath(pathname) ||
-    isGlobalTaskTemplatesPath(pathname)
+    isGlobalTaskTemplatesPath(pathname) ||
+    isGlobalChatPath(pathname)
   );
 }
 

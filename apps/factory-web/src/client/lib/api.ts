@@ -1,4 +1,8 @@
 import type {
+  AgentAction,
+  AgentMessage,
+  AgentScope,
+  AgentSession,
   Artifact,
   ArtifactContentResponse,
   AttractorDef,
@@ -90,6 +94,115 @@ export function artifactDownloadUrl(runId: string, artifactId: string): string {
 export async function listProjects(): Promise<Project[]> {
   const payload = await apiRequest<{ projects: Project[] }>("/api/projects");
   return payload.projects;
+}
+
+export async function updateProjectRedeployDefaults(
+  projectId: string,
+  input: {
+    redeployAttractorId?: string | null;
+    redeploySourceBranch?: string | null;
+    redeployTargetBranch?: string | null;
+    redeployEnvironmentId?: string | null;
+  }
+): Promise<Project> {
+  return apiRequest<Project>(`/api/projects/${projectId}/redeploy-defaults`, {
+    method: "PATCH",
+    body: JSON.stringify(input)
+  });
+}
+
+export async function listAgentSessions(input: {
+  scope: AgentScope;
+  projectId?: string;
+  limit?: number;
+}): Promise<AgentSession[]> {
+  const query = new URLSearchParams();
+  query.set("scope", input.scope);
+  if (input.projectId) {
+    query.set("projectId", input.projectId);
+  }
+  if (input.limit) {
+    query.set("limit", String(input.limit));
+  }
+  const payload = await apiRequest<{ sessions: AgentSession[] }>(
+    `/api/agent/sessions?${query.toString()}`
+  );
+  return payload.sessions;
+}
+
+export async function createAgentSession(input: {
+  scope: AgentScope;
+  projectId?: string;
+  title?: string;
+}): Promise<AgentSession> {
+  const payload = await apiRequest<{ session: AgentSession }>("/api/agent/sessions", {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+  return payload.session;
+}
+
+export async function getAgentSession(sessionId: string): Promise<AgentSession> {
+  const payload = await apiRequest<{ session: AgentSession }>(`/api/agent/sessions/${sessionId}`);
+  return payload.session;
+}
+
+export async function archiveAgentSession(sessionId: string): Promise<void> {
+  await apiRequest<unknown>(`/api/agent/sessions/${sessionId}`, {
+    method: "DELETE"
+  });
+}
+
+export async function listAgentSessionMessages(
+  sessionId: string,
+  limit?: number
+): Promise<{ messages: AgentMessage[]; actions: AgentAction[] }> {
+  const query = new URLSearchParams();
+  if (limit) {
+    query.set("limit", String(limit));
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return apiRequest<{ messages: AgentMessage[]; actions: AgentAction[] }>(
+    `/api/agent/sessions/${sessionId}/messages${suffix}`
+  );
+}
+
+export async function postAgentMessage(
+  sessionId: string,
+  content: string
+): Promise<{
+  userMessage: AgentMessage;
+  assistantMessage: AgentMessage;
+  pendingActions: AgentAction[];
+}> {
+  return apiRequest<{
+    userMessage: AgentMessage;
+    assistantMessage: AgentMessage;
+    pendingActions: AgentAction[];
+  }>(`/api/agent/sessions/${sessionId}/messages`, {
+    method: "POST",
+    body: JSON.stringify({ content })
+  });
+}
+
+export async function approveAgentAction(
+  sessionId: string,
+  actionId: string
+): Promise<{ action: AgentAction; assistantMessage: AgentMessage }> {
+  return apiRequest<{ action: AgentAction; assistantMessage: AgentMessage }>(
+    `/api/agent/sessions/${sessionId}/actions/${actionId}/approve`,
+    { method: "POST" }
+  );
+}
+
+export async function rejectAgentAction(
+  sessionId: string,
+  actionId: string
+): Promise<{ action: AgentAction; assistantMessage: AgentMessage }> {
+  return apiRequest<{ action: AgentAction; assistantMessage: AgentMessage }>(
+    `/api/agent/sessions/${sessionId}/actions/${actionId}/reject`,
+    { method: "POST" }
+  );
 }
 
 export async function connectProjectRepo(
