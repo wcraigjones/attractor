@@ -50,6 +50,12 @@ shell:
   sessionTtlSeconds: 1800
   podReadyTimeoutSeconds: 90
 
+selfDeploy:
+  runnerAccess:
+    enabled: true
+    projectNamespace: factory-proj-attractor-factory
+    serviceAccountName: factory-runner
+
 ingress:
   enabled: true
   className: ""
