@@ -28,6 +28,7 @@ const authConfig = resolveAuthConfig(process.env);
 if (authConfig.enabled) {
   process.stdout.write(`factory-web auth enabled for domain ${authConfig.allowedDomain}\n`);
 }
+const FACTORY_VERSION = (process.env.FACTORY_VERSION ?? "").trim() || "unknown";
 
 const currentDir = resolve(fileURLToPath(new URL(".", import.meta.url)));
 const clientDist = resolve(currentDir, "../client");
@@ -90,7 +91,12 @@ app.use((req, res, next) => {
 });
 
 app.get("/healthz", (_req, res) => {
-  res.json({ status: "ok", service: "factory-web", apiBaseUrl: API_BASE_URL });
+  res.json({
+    status: "ok",
+    service: "factory-web",
+    version: FACTORY_VERSION,
+    apiBaseUrl: API_BASE_URL
+  });
 });
 
 app.get("/auth/google/start", (req, res) => {
@@ -222,7 +228,9 @@ app.get("/auth/logout", (req, res) => {
 
 app.get("/app-config.js", (_req, res) => {
   res.type("application/javascript");
-  res.send(`window.__FACTORY_APP_CONFIG__ = { apiBaseUrl: ${JSON.stringify(API_BASE_URL)} };`);
+  res.send(
+    `window.__FACTORY_APP_CONFIG__ = { apiBaseUrl: ${JSON.stringify(API_BASE_URL)}, factoryVersion: ${JSON.stringify(FACTORY_VERSION)} };`
+  );
 });
 
 if (existsSync(clientDist)) {

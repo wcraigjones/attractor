@@ -45,6 +45,7 @@ import {
   type DotNode,
   type EngineState
 } from "./engine/index.js";
+import { executeToolNode, type RunCommandOptions } from "./tool-node.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -621,8 +622,17 @@ async function githubGitToken(installationId?: string): Promise<string | null> {
   }
 }
 
-async function runCommand(command: string, args: string[], cwd: string): Promise<string> {
-  const result = await execFileAsync(command, args, { cwd, maxBuffer: 10 * 1024 * 1024 });
+async function runCommand(
+  command: string,
+  args: string[],
+  cwd: string,
+  options: RunCommandOptions = {}
+): Promise<string> {
+  const result = await execFileAsync(command, args, {
+    cwd,
+    timeout: options.timeoutMs,
+    maxBuffer: 10 * 1024 * 1024
+  });
   return `${result.stdout ?? ""}${result.stderr ?? ""}`;
 }
 
@@ -1655,12 +1665,40 @@ async function processTaskRun(args: {
         return result.text;
       },
       tool: async ({ node }) => {
+        const outcome = await executeToolNode({
+          node,
+          workDir: args.workDir,
+          runCommand,
+          defaultOutput: `Tool node ${node.id} executed`
+        });
+
+        if (outcome.kind === "command_failure") {
+          await appendRunEvent(args.runId, "TaskToolNodeCommandFailed", {
+            runId: args.runId,
+            nodeId: node.id,
+            tool: outcome.tool,
+            command: outcome.command,
+            cwd: outcome.cwd,
+            timeoutMs: outcome.timeoutMs,
+            outputPreview: outcome.outputPreview
+          });
+          return outcome.output;
+        }
+
         await appendRunEvent(args.runId, "TaskToolNodeExecuted", {
           runId: args.runId,
           nodeId: node.id,
-          tool: node.attrs.tool ?? null
+          tool: outcome.tool,
+          ...(outcome.kind === "command_success"
+            ? {
+                command: outcome.command,
+                cwd: outcome.cwd,
+                timeoutMs: outcome.timeoutMs,
+                outputPreview: outcome.outputPreview
+              }
+            : {})
         });
-        return node.attrs.output ?? `Tool node ${node.id} executed`;
+        return outcome.output;
       },
       waitForHuman: async (question) =>
         waitForHumanQuestion({
@@ -1926,12 +1964,40 @@ async function processImplementationDotRun(args: {
         return result.text;
       },
       tool: async ({ node }) => {
+        const outcome = await executeToolNode({
+          node,
+          workDir: args.workDir,
+          runCommand,
+          defaultOutput: `Tool node ${node.id} executed`
+        });
+
+        if (outcome.kind === "command_failure") {
+          await appendRunEvent(args.run.id, "ImplementationToolNodeCommandFailed", {
+            runId: args.run.id,
+            nodeId: node.id,
+            tool: outcome.tool,
+            command: outcome.command,
+            cwd: outcome.cwd,
+            timeoutMs: outcome.timeoutMs,
+            outputPreview: outcome.outputPreview
+          });
+          return outcome.output;
+        }
+
         await appendRunEvent(args.run.id, "ImplementationToolNodeExecuted", {
           runId: args.run.id,
           nodeId: node.id,
-          tool: node.attrs.tool ?? null
+          tool: outcome.tool,
+          ...(outcome.kind === "command_success"
+            ? {
+                command: outcome.command,
+                cwd: outcome.cwd,
+                timeoutMs: outcome.timeoutMs,
+                outputPreview: outcome.outputPreview
+              }
+            : {})
         });
-        return node.attrs.output ?? `Tool node ${node.id} executed`;
+        return outcome.output;
       },
       waitForHuman: async (question) =>
         waitForHumanQuestion({

@@ -102,6 +102,42 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: factory-runner-controller-role-{{ include "factory.namespace" . }}
+{{- if .Values.selfDeploy.runnerAccess.enabled }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: factory-self-deploy-runner
+  namespace: {{ include "factory.namespace" . }}
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/status"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: factory-self-deploy-runner
+  namespace: {{ include "factory.namespace" . }}
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.selfDeploy.runnerAccess.serviceAccountName | quote }}
+    namespace: {{ .Values.selfDeploy.runnerAccess.projectNamespace | quote }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: factory-self-deploy-runner
+{{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -325,6 +361,8 @@ spec:
           env:
             - name: PORT
               value: {{ .Values.service.api.port | quote }}
+            - name: FACTORY_VERSION
+              value: {{ default "" .Values.global.factoryVersion | quote }}
             - name: REDIS_URL
               value: "redis://redis.{{ include "factory.namespace" . }}.svc.cluster.local:6379"
             - name: DATABASE_URL
@@ -420,6 +458,8 @@ spec:
           env:
             - name: PORT
               value: {{ .Values.service.web.port | quote }}
+            - name: FACTORY_VERSION
+              value: {{ default "" .Values.global.factoryVersion | quote }}
             - name: API_BASE_URL
               value: {{ .Values.web.apiBaseUrl | quote }}
             - name: FACTORY_AUTH_GOOGLE_CLIENT_ID
