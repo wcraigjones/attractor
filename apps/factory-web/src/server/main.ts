@@ -23,6 +23,7 @@ app.set("trust proxy", true);
 const PORT = Number(process.env.PORT ?? 3000);
 const HOST = process.env.HOST ?? "0.0.0.0";
 const API_BASE_URL = process.env.API_BASE_URL ?? "/api";
+const FACTORY_VERSION = (process.env.FACTORY_VERSION ?? "").trim() || "unknown";
 const authConfig = resolveAuthConfig(process.env);
 
 if (authConfig.enabled) {
@@ -90,7 +91,12 @@ app.use((req, res, next) => {
 });
 
 app.get("/healthz", (_req, res) => {
-  res.json({ status: "ok", service: "factory-web", apiBaseUrl: API_BASE_URL });
+  res.json({
+    status: "ok",
+    service: "factory-web",
+    version: FACTORY_VERSION,
+    apiBaseUrl: API_BASE_URL
+  });
 });
 
 app.get("/auth/google/start", (req, res) => {
@@ -222,7 +228,9 @@ app.get("/auth/logout", (req, res) => {
 
 app.get("/app-config.js", (_req, res) => {
   res.type("application/javascript");
-  res.send(`window.__FACTORY_APP_CONFIG__ = { apiBaseUrl: ${JSON.stringify(API_BASE_URL)} };`);
+  res.send(
+    `window.__FACTORY_APP_CONFIG__ = { apiBaseUrl: ${JSON.stringify(API_BASE_URL)}, factoryVersion: ${JSON.stringify(FACTORY_VERSION)} };`
+  );
 });
 
 if (existsSync(clientDist)) {

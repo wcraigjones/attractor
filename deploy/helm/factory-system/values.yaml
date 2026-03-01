@@ -3,6 +3,7 @@ namespace: factory-system
 
 global:
   imagePullPolicy: IfNotPresent
+  factoryVersion: ""
 
 images:
   api:
@@ -62,6 +63,12 @@ taskTemplateScheduler:
   enabled: true
   intervalSeconds: 30
   batchSize: 50
+
+selfDeploy:
+  runnerAccess:
+    enabled: true
+    projectNamespace: factory-proj-attractor-factory
+    serviceAccountName: factory-runner
 
 ingress:
   enabled: true

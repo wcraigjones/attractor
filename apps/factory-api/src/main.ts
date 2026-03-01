@@ -144,6 +144,7 @@ app.use((req, res, next) => {
 
 const PORT = Number(process.env.PORT ?? 8080);
 const HOST = process.env.HOST ?? "0.0.0.0";
+const FACTORY_VERSION = (process.env.FACTORY_VERSION ?? "").trim() || "unknown";
 const RUNNER_DEFAULT_IMAGE =
   process.env.RUNNER_IMAGE ?? "ghcr.io/wcraigjones/attractor-factory-runner:latest";
 const RUNNER_DEFAULT_SERVICE_ACCOUNT = process.env.RUNNER_SERVICE_ACCOUNT ?? "factory-runner";
@@ -2283,7 +2284,20 @@ function sendError(res: express.Response, status: number, error: string) {
 }
 
 app.get("/healthz", (_req, res) => {
-  res.json({ status: "ok", service: "factory-api", runnerImage: RUNNER_DEFAULT_IMAGE });
+  res.json({
+    status: "ok",
+    service: "factory-api",
+    version: FACTORY_VERSION,
+    runnerImage: RUNNER_DEFAULT_IMAGE
+  });
+});
+
+app.get("/api/status", (_req, res) => {
+  res.json({
+    status: "ok",
+    service: "factory-api",
+    version: FACTORY_VERSION
+  });
 });
 
 app.get("/api/models/providers", (_req, res) => {
