@@ -1,4 +1,5 @@
 import { Navigate, Route, Routes } from "react-router-dom";
+import { Toaster } from "./components/ui/toast";
 
 import { AppShell } from "./components/layout/app-shell";
 import { ArtifactViewerPage } from "./pages/artifact-viewer-page";
@@ -23,6 +24,8 @@ import { RunDetailPage } from "./pages/run-detail-page";
 
 export function App() {
   return (
+    <>
+    <Toaster />
     <Routes>
       <Route path="/" element={<AppShell />}>
         <Route index element={<DashboardPage />} />
@@ -49,5 +52,6 @@ export function App() {
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
+    </>
   );
 }

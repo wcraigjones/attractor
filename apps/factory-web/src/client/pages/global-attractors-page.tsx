@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
+import { toast } from "../components/ui/toast";
 
 import { getGlobalAttractor, listGlobalAttractors, upsertGlobalAttractor } from "../lib/api";
 import { PageTitle } from "../components/layout/page-title";

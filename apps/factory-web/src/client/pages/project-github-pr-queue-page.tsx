@@ -1,6 +1,6 @@
 import { Link, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
+import { toast } from "../components/ui/toast";
 
 import { listProjectGitHubPulls, reconcileProjectGitHub } from "../lib/api";
 import { PageTitle } from "../components/layout/page-title";

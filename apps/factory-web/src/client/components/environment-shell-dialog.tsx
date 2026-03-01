@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { toast } from "sonner";
+import { toast } from "./ui/toast";
 import "@xterm/xterm/css/xterm.css";
 
 import {

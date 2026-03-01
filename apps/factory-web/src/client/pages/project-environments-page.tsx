@@ -1,7 +1,7 @@
 import { Link, useParams } from "react-router-dom";
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
+import { toast } from "../components/ui/toast";
 
 import { listEnvironments, listProjects, setProjectDefaultEnvironment } from "../lib/api";
 import { getInactiveDefaultEnvironment, listActiveEnvironments } from "../lib/environments-view";
