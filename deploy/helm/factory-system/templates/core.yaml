@@ -299,6 +299,8 @@ spec:
           env:
             - name: PORT
               value: {{ .Values.service.api.port | quote }}
+            - name: FACTORY_VERSION
+              value: {{ default "" .Values.global.factoryVersion | quote }}
             - name: REDIS_URL
               value: "redis://redis.{{ include "factory.namespace" . }}.svc.cluster.local:6379"
             - name: DATABASE_URL
@@ -380,6 +382,8 @@ spec:
           env:
             - name: PORT
               value: {{ .Values.service.web.port | quote }}
+            - name: FACTORY_VERSION
+              value: {{ default "" .Values.global.factoryVersion | quote }}
             - name: API_BASE_URL
               value: {{ .Values.web.apiBaseUrl | quote }}
           resources:

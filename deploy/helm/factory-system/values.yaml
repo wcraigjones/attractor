@@ -3,6 +3,7 @@ namespace: factory-system
 
 global:
   imagePullPolicy: IfNotPresent
+  factoryVersion: ""
 
 images:
   api:
