@@ -57,4 +57,57 @@ describe("task templates view helpers", () => {
     expect(projectRow?.status).toBe("Project");
     expect(projectRow?.muted).toBe(false);
   });
+
+  it("marks non-overridden globals as Inherited", () => {
+    const rows = buildTaskTemplateViewRows([
+      template({ id: "g1", scope: "GLOBAL", name: "review" })
+    ]);
+
+    expect(rows[0]?.status).toBe("Inherited");
+    expect(rows[0]?.muted).toBe(false);
+    expect(rows[0]?.source).toBe("global");
+  });
+
+  it("returns empty array for empty input", () => {
+    expect(buildEffectiveTaskTemplates([])).toEqual([]);
+    expect(buildTaskTemplateViewRows([])).toEqual([]);
+  });
+
+  it("populates view row fields from template data", () => {
+    const rows = buildTaskTemplateViewRows([
+      template({
+        id: "p1",
+        scope: "PROJECT",
+        name: "deploy",
+        attractorName: "deploy-attractor",
+        runType: "implementation",
+        active: false,
+        scheduleEnabled: true,
+        scheduleNextRunAt: "2026-03-02T12:00:00Z"
+      })
+    ]);
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: "project:p1",
+      taskTemplateId: "p1",
+      source: "project",
+      name: "deploy",
+      attractorName: "deploy-attractor",
+      runType: "implementation",
+      active: false,
+      scheduleEnabled: true,
+      scheduleNextRunAt: "2026-03-02T12:00:00Z",
+      status: "Project"
+    });
+  });
+
+  it("keeps all globals when no project templates exist", () => {
+    const rows = buildEffectiveTaskTemplates([
+      template({ id: "g1", scope: "GLOBAL", name: "plan" }),
+      template({ id: "g2", scope: "GLOBAL", name: "review" })
+    ]);
+
+    expect(rows.map((row) => row.id)).toEqual(["g1", "g2"]);
+  });
 });

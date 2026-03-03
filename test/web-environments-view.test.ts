@@ -69,4 +69,32 @@ describe("environment view helpers", () => {
     ).toBeNull();
     expect(getInactiveDefaultEnvironment(undefined, [environment({ id: "env-1", name: "one", active: true })])).toBeNull();
   });
+
+  it("returns null when defaultEnvironmentId is not in the environments list", () => {
+    expect(
+      getInactiveDefaultEnvironment(
+        project({ id: "proj-1", name: "Project", namespace: "ns", defaultEnvironmentId: "env-missing" }),
+        [environment({ id: "env-1", name: "one", active: true })]
+      )
+    ).toBeNull();
+  });
+
+  it("handles empty environments array", () => {
+    expect(listActiveEnvironments([])).toEqual([]);
+    expect(
+      getInactiveDefaultEnvironment(
+        project({ id: "proj-1", name: "Project", namespace: "ns", defaultEnvironmentId: "env-1" }),
+        []
+      )
+    ).toBeNull();
+  });
+
+  it("returns null when project has no defaultEnvironmentId", () => {
+    expect(
+      getInactiveDefaultEnvironment(
+        project({ id: "proj-1", name: "Project", namespace: "ns", defaultEnvironmentId: null }),
+        [environment({ id: "env-1", name: "one", active: false })]
+      )
+    ).toBeNull();
+  });
 });

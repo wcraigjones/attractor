@@ -6,6 +6,8 @@ import {
   isGlobalAttractorsPath,
   isGlobalChatPath,
   isGlobalEnvironmentsPath,
+  isGlobalScopePath,
+  isGlobalSecretsPath,
   isGlobalTaskTemplatesPath,
   resolveSelectedScope,
   scopeToPath
@@ -88,5 +90,80 @@ describe("scope selector helpers", () => {
   it("falls back to /environments/global when project sub-route has no global equivalent", () => {
     expect(scopeToPath(GLOBAL_SCOPE_VALUE, "/projects/proj-1")).toBe("/environments/global");
     expect(scopeToPath(GLOBAL_SCOPE_VALUE, "/projects/proj-1/runs")).toBe("/environments/global");
+  });
+
+  it("maps global scope with nested project sub-routes", () => {
+    expect(scopeToPath(GLOBAL_SCOPE_VALUE, "/projects/proj-1/secrets/some-secret")).toBe("/secrets/global");
+    expect(scopeToPath(GLOBAL_SCOPE_VALUE, "/projects/proj-1/attractors/attr-1")).toBe("/attractors/global");
+  });
+
+  it("returns empty options list with Global when no projects exist", () => {
+    const options = buildScopeOptions([]);
+    expect(options).toEqual([{ value: GLOBAL_SCOPE_VALUE, label: "Global" }]);
+  });
+});
+
+describe("isGlobal*Path helpers", () => {
+  it("detects global secrets paths including sub-paths", () => {
+    expect(isGlobalSecretsPath("/secrets/global")).toBe(true);
+    expect(isGlobalSecretsPath("/secrets/global/some-id")).toBe(true);
+    expect(isGlobalSecretsPath("/secrets/other")).toBe(false);
+    expect(isGlobalSecretsPath("/projects/proj-1/secrets")).toBe(false);
+  });
+
+  it("detects global attractors paths including sub-paths", () => {
+    expect(isGlobalAttractorsPath("/attractors/global")).toBe(true);
+    expect(isGlobalAttractorsPath("/attractors/global/attr-1")).toBe(true);
+    expect(isGlobalAttractorsPath("/attractors/proj-1")).toBe(false);
+  });
+
+  it("detects global environments paths including sub-paths", () => {
+    expect(isGlobalEnvironmentsPath("/environments/global")).toBe(true);
+    expect(isGlobalEnvironmentsPath("/environments/global/env-1")).toBe(true);
+    expect(isGlobalEnvironmentsPath("/environments/other")).toBe(false);
+  });
+
+  it("detects global task-templates paths including sub-paths", () => {
+    expect(isGlobalTaskTemplatesPath("/task-templates/global")).toBe(true);
+    expect(isGlobalTaskTemplatesPath("/task-templates/global/tt-1")).toBe(true);
+    expect(isGlobalTaskTemplatesPath("/task-templates/other")).toBe(false);
+  });
+
+  it("detects global chat paths including sub-paths", () => {
+    expect(isGlobalChatPath("/chat")).toBe(true);
+    expect(isGlobalChatPath("/chat/session-1")).toBe(true);
+    expect(isGlobalChatPath("/chats")).toBe(false);
+  });
+
+  it("isGlobalScopePath returns true for any global path and false for non-global", () => {
+    expect(isGlobalScopePath("/secrets/global")).toBe(true);
+    expect(isGlobalScopePath("/attractors/global")).toBe(true);
+    expect(isGlobalScopePath("/environments/global")).toBe(true);
+    expect(isGlobalScopePath("/task-templates/global")).toBe(true);
+    expect(isGlobalScopePath("/chat")).toBe(true);
+    expect(isGlobalScopePath("/projects/proj-1/secrets")).toBe(false);
+    expect(isGlobalScopePath("/")).toBe(false);
+    expect(isGlobalScopePath("/projects")).toBe(false);
+  });
+});
+
+describe("resolveSelectedScope edge cases", () => {
+  it("global path takes priority over projectIdFromPath", () => {
+    expect(
+      resolveSelectedScope({
+        pathname: "/secrets/global",
+        projectIdFromPath: "proj-1",
+        fallbackProjectId: "proj-2"
+      })
+    ).toBe(GLOBAL_SCOPE_VALUE);
+  });
+
+  it("returns undefined when no scope can be resolved", () => {
+    expect(resolveSelectedScope({ pathname: "/" })).toBeUndefined();
+  });
+
+  it("resolves sub-paths of global resources to global scope", () => {
+    expect(resolveSelectedScope({ pathname: "/attractors/global/attr-1" })).toBe(GLOBAL_SCOPE_VALUE);
+    expect(resolveSelectedScope({ pathname: "/task-templates/global/tt-1" })).toBe(GLOBAL_SCOPE_VALUE);
   });
 });

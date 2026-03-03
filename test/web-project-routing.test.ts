@@ -34,4 +34,18 @@ describe("project routing helpers", () => {
     expect(pathForProjectSelection("/environments/global", "proj-b")).toBe("/projects/proj-b/environments");
     expect(pathForProjectSelection("/task-templates/global", "proj-b")).toBe("/projects/proj-b/task-templates");
   });
+
+  it("routes global resource sub-paths to project equivalents", () => {
+    expect(pathForProjectSelection("/attractors/global/attr-1", "proj-b")).toBe("/projects/proj-b/attractors");
+    expect(pathForProjectSelection("/secrets/global/sec-1", "proj-b")).toBe("/projects/proj-b/secrets");
+  });
+
+  it("routes chat sub-paths to project chat", () => {
+    expect(pathForProjectSelection("/chat/session-1", "proj-b")).toBe("/projects/proj-b/chat");
+  });
+
+  it("normalizes empty pathname to project overview", () => {
+    expect(pathForProjectSelection("", "proj-b")).toBe("/projects/proj-b");
+    expect(pathForProjectSelection("  ", "proj-b")).toBe("/projects/proj-b");
+  });
 });
