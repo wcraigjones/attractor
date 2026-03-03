@@ -142,7 +142,11 @@ function resolveModelConfig(config: RunModelConfig): {
     }
   }
 
-  throw new Error(`Unknown model ${config.modelId} for provider ${config.provider}`);
+  const available = getModels(config.provider as never).map(m => m.id);
+  throw new Error(
+    `Unknown model ${config.modelId} for provider ${config.provider}. ` +
+    `Available models: ${available.slice(0, 10).join(", ")}${available.length > 10 ? ` (and ${available.length - 10} more)` : ""}`
+  );
 }
 
 function ensureModel(config: RunModelConfig) {
@@ -151,7 +155,11 @@ function ensureModel(config: RunModelConfig) {
   }
   const model = getModel(config.provider as never, config.modelId as never);
   if (!model) {
-    throw new Error(`Unknown model ${config.modelId} for provider ${config.provider}`);
+    const available = getModels(config.provider as never).map(m => m.id);
+    throw new Error(
+      `Unknown model ${config.modelId} for provider ${config.provider}. ` +
+      `Available models: ${available.slice(0, 10).join(", ")}${available.length > 10 ? ` (and ${available.length - 10} more)` : ""}`
+    );
   }
   return model;
 }
