@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "dev:server": "tsx watch src/server/main.ts",
-    "start": "node dist/server/main.js",
+    "start": "node dist/server/apps/factory-web/src/server/main.js",
     "build": "vite build && tsc -p tsconfig.server.json",
     "check-types": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.client.json --noEmit"
   },
