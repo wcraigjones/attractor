@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/api-auth.sh
+source "$SCRIPT_DIR/lib/api-auth.sh"
+
 API_BASE_URL="${API_BASE_URL:-http://localhost:8080}"
 REPO_FULL_NAME="${REPO_FULL_NAME:-wcraigjones/attractor}"
 DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
@@ -43,7 +47,7 @@ bootstrap_payload=$(
   '
 )
 
-bootstrap_response=$(curl -sS -X POST "$API_BASE_URL/api/bootstrap/self" \
+bootstrap_response=$(curl -sS "${API_AUTH_CURL_ARGS[@]}" -X POST "$API_BASE_URL/api/bootstrap/self" \
   -H 'content-type: application/json' \
   -d "$bootstrap_payload")
 
@@ -75,7 +79,7 @@ run_payload=$(cat <<JSON
 JSON
 )
 
-run_response=$(curl -sS -X POST "$API_BASE_URL/api/runs" \
+run_response=$(curl -sS "${API_AUTH_CURL_ARGS[@]}" -X POST "$API_BASE_URL/api/runs" \
   -H 'content-type: application/json' \
   -d "$run_payload")
 

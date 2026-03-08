@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/api-auth.sh
+source "$SCRIPT_DIR/lib/api-auth.sh"
+
 API_BASE_URL="${API_BASE_URL:-http://localhost:8080}"
 REPO_FULL_NAME="${REPO_FULL_NAME:-wcraigjones/attractor}"
 DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
@@ -41,7 +45,7 @@ bootstrap_payload=$(cat <<JSON
 JSON
 )
 
-bootstrap_response=$(curl -sS -X POST "$API_BASE_URL/api/bootstrap/self" \
+bootstrap_response=$(curl -sS "${API_AUTH_CURL_ARGS[@]}" -X POST "$API_BASE_URL/api/bootstrap/self" \
   -H 'content-type: application/json' \
   -d "$bootstrap_payload")
 
@@ -71,7 +75,7 @@ planning_payload=$(cat <<JSON
 JSON
 )
 
-planning_response=$(curl -sS -X POST "$API_BASE_URL/api/runs" \
+planning_response=$(curl -sS "${API_AUTH_CURL_ARGS[@]}" -X POST "$API_BASE_URL/api/runs" \
   -H 'content-type: application/json' \
   -d "$planning_payload")
 planning_run_id=$(node -e 'const d=JSON.parse(process.argv[1]); console.log(d.runId)' "$planning_response")
@@ -81,7 +85,7 @@ echo "planning_run_id=$planning_run_id"
 echo "Waiting for planning run to complete..."
 planning_status=""
 while true; do
-  run_json=$(curl -sS "$API_BASE_URL/api/runs/$planning_run_id")
+  run_json=$(curl -sS "${API_AUTH_CURL_ARGS[@]}" "$API_BASE_URL/api/runs/$planning_run_id")
   planning_status=$(node -e 'const d=JSON.parse(process.argv[1]); console.log(d.status)' "$run_json")
   echo "planning_status=$planning_status"
   if contains_terminal_status "$planning_status"; then
@@ -105,7 +109,7 @@ implementation_payload=$(cat <<JSON
 JSON
 )
 
-implementation_response=$(curl -sS -X POST "$API_BASE_URL/api/projects/$project_id/self-iterate" \
+implementation_response=$(curl -sS "${API_AUTH_CURL_ARGS[@]}" -X POST "$API_BASE_URL/api/projects/$project_id/self-iterate" \
   -H 'content-type: application/json' \
   -d "$implementation_payload")
 implementation_run_id=$(node -e 'const d=JSON.parse(process.argv[1]); console.log(d.runId)' "$implementation_response")
@@ -116,7 +120,7 @@ echo "Waiting for implementation run to complete..."
 implementation_status=""
 implementation_pr_url=""
 while true; do
-  run_json=$(curl -sS "$API_BASE_URL/api/runs/$implementation_run_id")
+  run_json=$(curl -sS "${API_AUTH_CURL_ARGS[@]}" "$API_BASE_URL/api/runs/$implementation_run_id")
   implementation_status=$(node -e 'const d=JSON.parse(process.argv[1]); console.log(d.status)' "$run_json")
   implementation_pr_url=$(node -e 'const d=JSON.parse(process.argv[1]); console.log(d.prUrl ?? "")' "$run_json")
   echo "implementation_status=$implementation_status"

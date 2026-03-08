@@ -36,6 +36,7 @@ import type {
 } from "./types";
 
 const DEFAULT_API_BASE = "/api";
+let authReloadTriggered = false;
 
 export function getApiBase(): string {
   const configBase = window.__FACTORY_APP_CONFIG__?.apiBaseUrl;
@@ -77,9 +78,10 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     if (response.status === 401 && typeof window !== "undefined") {
-      const returnTo = `${window.location.pathname}${window.location.search}`;
-      const safeReturnTo = returnTo.startsWith("/") ? returnTo : "/";
-      window.location.assign(`/auth/google/start?returnTo=${encodeURIComponent(safeReturnTo)}`);
+      if (!authReloadTriggered) {
+        authReloadTriggered = true;
+        window.location.reload();
+      }
     }
     const errorMessage =
       typeof payload?.error === "string" ? payload.error : `${response.status} ${response.statusText}`;

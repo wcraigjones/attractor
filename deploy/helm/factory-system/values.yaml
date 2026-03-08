@@ -41,10 +41,11 @@ web:
   apiBaseUrl: /api
 
 auth:
-  googleClientId: ""
-  googleClientSecret: ""
-  allowedDomain: ""
-  sessionSecret: ""
+  basic:
+    username: "factory"
+    passwordHash: ""
+    realm: "Attractor Factory"
+    existingSecretName: ""
 
 github:
   appSlug: ""

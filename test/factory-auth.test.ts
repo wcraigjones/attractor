@@ -1,102 +1,108 @@
+import { scryptSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import * as webAuth from "../apps/factory-web/src/server/auth";
-import * as apiAuth from "../apps/factory-api/src/auth";
+import {
+  authenticateBasicHeader,
+  buildWwwAuthenticateHeader,
+  parseBasicAuthorization,
+  resolveAuthConfig,
+  verifyPasswordHash
+} from "@attractor/shared-auth";
 
-type AuthModule = typeof webAuth;
-
-const modules: Array<{ name: string; auth: AuthModule }> = [
-  { name: "web", auth: webAuth },
-  { name: "api", auth: apiAuth }
-];
-
-const ENABLED_ENV: NodeJS.ProcessEnv = {
-  FACTORY_AUTH_GOOGLE_CLIENT_ID: "google-client-id",
-  FACTORY_AUTH_GOOGLE_CLIENT_SECRET: "google-client-secret",
-  FACTORY_AUTH_ALLOWED_DOMAIN: "PelicanDynamics.com",
-  FACTORY_AUTH_SESSION_SECRET: "very-secret-value"
-};
-
-function enabledConfig(auth: AuthModule): Extract<ReturnType<AuthModule["resolveAuthConfig"]>, { enabled: true }> {
-  const config = auth.resolveAuthConfig(ENABLED_ENV);
-  if (!config.enabled) {
-    throw new Error("expected enabled config");
-  }
-  return config;
+function createPasswordHash(password: string): string {
+  const salt = Buffer.from("factory-auth-test-salt", "utf8");
+  const derivedKey = scryptSync(password, salt, 32, {
+    N: 16384,
+    r: 8,
+    p: 1
+  });
+  return `scrypt$16384$8$1$${salt.toString("base64url")}$${derivedKey.toString("base64url")}`;
 }
 
-for (const { name, auth } of modules) {
-  describe(`${name} factory auth`, () => {
-    it("disables auth when all auth env vars are unset", () => {
-      expect(auth.resolveAuthConfig({})).toEqual({ enabled: false });
+const TEST_PASSWORD = "correct horse battery staple";
+const TEST_PASSWORD_HASH = createPasswordHash(TEST_PASSWORD);
+
+describe("shared factory auth", () => {
+  it("disables auth when password hash is unset", () => {
+    expect(resolveAuthConfig({})).toEqual({ enabled: false });
+  });
+
+  it("uses default username and realm", () => {
+    const config = resolveAuthConfig({
+      FACTORY_AUTH_BASIC_PASSWORD_HASH: TEST_PASSWORD_HASH
     });
 
-    it("throws when auth env vars are partially configured", () => {
-      expect(() =>
-        auth.resolveAuthConfig({
-          FACTORY_AUTH_GOOGLE_CLIENT_ID: "id",
-          FACTORY_AUTH_ALLOWED_DOMAIN: "pelicandynamics.com"
-        })
-      ).toThrow(/Missing:/);
-    });
-
-    it("enables auth and normalizes configured domain", () => {
-      const config = enabledConfig(auth);
-      expect(config.allowedDomain).toBe("pelicandynamics.com");
-    });
-
-    it("roundtrips signed state token and rejects tampering", () => {
-      const config = enabledConfig(auth);
-      const now = 1_700_000_000;
-      const stateToken = auth.createStateToken(config, "/projects/abc?tab=1", now);
-      const state = auth.readStateToken(config, stateToken, now + 1);
-      expect(state?.returnTo).toBe("/projects/abc?tab=1");
-
-      const [payload, signature] = stateToken.split(".");
-      const tamperedSignature = `${signature.slice(0, -1)}${signature.endsWith("a") ? "b" : "a"}`;
-      expect(auth.readStateToken(config, `${payload}.${tamperedSignature}`, now + 1)).toBeNull();
-    });
-
-    it("rejects expired state token", () => {
-      const config = enabledConfig(auth);
-      const now = 1_700_000_000;
-      const stateToken = auth.createStateToken(config, "/", now);
-      expect(auth.readStateToken(config, stateToken, now + 601)).toBeNull();
-    });
-
-    it("roundtrips session token for allowed exact and subdomains", () => {
-      const config = enabledConfig(auth);
-      const now = 1_700_000_000;
-
-      const exact = auth.createSessionToken(config, "dev@pelicandynamics.com", now);
-      const exactSession = auth.readSessionToken(config, exact, now + 1);
-      expect(exactSession?.email).toBe("dev@pelicandynamics.com");
-
-      const subdomain = auth.createSessionToken(config, "dev@eng.pelicandynamics.com", now);
-      const subdomainSession = auth.readSessionToken(config, subdomain, now + 1);
-      expect(subdomainSession?.domain).toBe("eng.pelicandynamics.com");
-    });
-
-    it("rejects disallowed domain", () => {
-      const config = enabledConfig(auth);
-      expect(() => auth.createSessionToken(config, "dev@other.com")).toThrow(/not allowed/);
-      expect(auth.isEmailDomainAllowed("other.com", config.allowedDomain)).toBe(false);
-    });
-
-    it("rejects expired session token", () => {
-      const config = enabledConfig(auth);
-      const now = 1_700_000_000;
-      const token = auth.createSessionToken(config, "dev@pelicandynamics.com", now);
-      expect(auth.readSessionToken(config, token, now + 43_201)).toBeNull();
-    });
-
-    it("sanitizes returnTo and parses cookies", () => {
-      expect(auth.sanitizeReturnTo("https://evil.example")).toBe("/");
-      expect(auth.sanitizeReturnTo("//evil.example/path")).toBe("/");
-      expect(auth.sanitizeReturnTo("/projects/1?tab=run")).toBe("/projects/1?tab=run");
-
-      const parsed = auth.parseCookieHeader("a=1; factory_auth_session=abc%2E123");
-      expect(parsed.a).toBe("1");
-      expect(parsed.factory_auth_session).toBe("abc.123");
+    expect(config).toEqual({
+      enabled: true,
+      username: "factory",
+      realm: "Attractor Factory",
+      passwordHash: TEST_PASSWORD_HASH
     });
   });
-}
+
+  it("throws when the password hash is malformed", () => {
+    expect(() =>
+      resolveAuthConfig({
+        FACTORY_AUTH_BASIC_PASSWORD_HASH: "not-a-valid-hash"
+      })
+    ).toThrow(/FACTORY_AUTH_BASIC_PASSWORD_HASH/);
+  });
+
+  it("verifies the correct password and rejects the wrong one", () => {
+    expect(verifyPasswordHash(TEST_PASSWORD_HASH, TEST_PASSWORD)).toBe(true);
+    expect(verifyPasswordHash(TEST_PASSWORD_HASH, "wrong password")).toBe(false);
+  });
+
+  it("parses a valid basic authorization header", () => {
+    const header = `Basic ${Buffer.from("factory:secret", "utf8").toString("base64")}`;
+    expect(parseBasicAuthorization(header)).toEqual({
+      username: "factory",
+      password: "secret"
+    });
+  });
+
+  it("rejects malformed basic authorization headers", () => {
+    expect(parseBasicAuthorization("Bearer nope")).toBeNull();
+    expect(parseBasicAuthorization("Basic !!!")).toBeNull();
+    expect(parseBasicAuthorization("Basic ")).toBeNull();
+  });
+
+  it("authenticates a valid header and returns the configured username", () => {
+    const config = resolveAuthConfig({
+      FACTORY_AUTH_BASIC_PASSWORD_HASH: TEST_PASSWORD_HASH,
+      FACTORY_AUTH_BASIC_USERNAME: "factory-admin"
+    });
+    if (!config.enabled) {
+      throw new Error("expected auth to be enabled");
+    }
+
+    const header = `Basic ${Buffer.from(`factory-admin:${TEST_PASSWORD}`, "utf8").toString("base64")}`;
+    expect(authenticateBasicHeader(header, config)).toEqual({
+      username: "factory-admin"
+    });
+  });
+
+  it("rejects an incorrect username even with the correct password", () => {
+    const config = resolveAuthConfig({
+      FACTORY_AUTH_BASIC_PASSWORD_HASH: TEST_PASSWORD_HASH,
+      FACTORY_AUTH_BASIC_USERNAME: "factory-admin"
+    });
+    if (!config.enabled) {
+      throw new Error("expected auth to be enabled");
+    }
+
+    const header = `Basic ${Buffer.from(`factory:${TEST_PASSWORD}`, "utf8").toString("base64")}`;
+    expect(authenticateBasicHeader(header, config)).toBeNull();
+  });
+
+  it("builds a basic auth challenge header using the configured realm", () => {
+    const config = resolveAuthConfig({
+      FACTORY_AUTH_BASIC_PASSWORD_HASH: TEST_PASSWORD_HASH,
+      FACTORY_AUTH_BASIC_REALM: "Factory Control Plane"
+    });
+    if (!config.enabled) {
+      throw new Error("expected auth to be enabled");
+    }
+
+    expect(buildWwwAuthenticateHeader(config)).toBe('Basic realm="Factory Control Plane"');
+  });
+});

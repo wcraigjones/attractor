@@ -70,11 +70,13 @@ import {
   toProjectNamespace
 } from "@attractor/shared-k8s";
 import {
-  FACTORY_AUTH_SESSION_COOKIE_NAME,
-  parseCookieHeader,
-  readSessionToken,
-  resolveAuthConfig
-} from "./auth.js";
+  authenticateBasicHeader,
+  buildWwwAuthenticateHeader,
+  isAuthEnabled,
+  resolveAuthConfig,
+  type AuthEnabledConfig,
+  type AuthenticatedPrincipal
+} from "@attractor/shared-auth";
 import { clampPreviewBytes, isProbablyText, isTextByMetadata } from "./artifact-preview.js";
 import {
   checkConclusionForDecision,
@@ -137,12 +139,20 @@ app.use((req, res, next) => {
 });
 
 const authConfig = resolveAuthConfig(process.env);
-if (authConfig.enabled) {
-  process.stdout.write(`factory-api auth enabled for domain ${authConfig.allowedDomain}\n`);
+if (isAuthEnabled(authConfig)) {
+  process.stdout.write(`factory-api basic auth enabled for user ${authConfig.username}\n`);
+}
+
+function authenticateRequest(header: string | string[] | undefined): AuthenticatedPrincipal | null {
+  return authenticateBasicHeader(header, authConfig);
+}
+
+function setAuthChallenge(res: express.Response, config: AuthEnabledConfig): void {
+  res.setHeader("WWW-Authenticate", buildWwwAuthenticateHeader(config));
 }
 
 app.use((req, res, next) => {
-  if (!authConfig.enabled) {
+  if (!isAuthEnabled(authConfig)) {
     next();
     return;
   }
@@ -154,9 +164,9 @@ app.use((req, res, next) => {
     next();
     return;
   }
-  const cookies = parseCookieHeader(req.headers.cookie);
-  const session = readSessionToken(authConfig, cookies[FACTORY_AUTH_SESSION_COOKIE_NAME]);
-  if (!session) {
+  const principal = authenticateRequest(req.headers.authorization);
+  if (!principal) {
+    setAuthChallenge(res, authConfig);
     sendError(res, 401, "authentication required");
     return;
   }
@@ -2360,13 +2370,11 @@ class ApiError extends Error {
   }
 }
 
-function getRequestActorEmail(req: express.Request): string | null {
-  if (!authConfig.enabled) {
+function getRequestActorPrincipal(req: express.Request): AuthenticatedPrincipal | null {
+  if (!isAuthEnabled(authConfig)) {
     return null;
   }
-  const cookies = parseCookieHeader(req.headers.cookie);
-  const session = readSessionToken(authConfig, cookies[FACTORY_AUTH_SESSION_COOKIE_NAME]);
-  return session?.email ?? null;
+  return authenticateRequest(req.headers.authorization);
 }
 
 function clampAgentText(value: string, maxChars = 2000): string {
@@ -5919,7 +5927,7 @@ app.post("/api/agent/sessions", async (req, res) => {
     }
   }
 
-  const actorEmail = getRequestActorEmail(req);
+  const actorEmail = getRequestActorPrincipal(req)?.username ?? null;
   const session = await prisma.agentSession.create({
     data: {
       scope: input.data.scope as AgentScope,
@@ -6015,7 +6023,7 @@ app.post("/api/agent/sessions/:sessionId/messages", async (req, res) => {
     return sendError(res, 500, error instanceof Error ? error.message : String(error));
   }
 
-  const actorEmail = getRequestActorEmail(req);
+  const actorEmail = getRequestActorPrincipal(req)?.username ?? null;
   const userMessage = await prisma.agentMessage.create({
     data: {
       sessionId: session.id,
@@ -6108,7 +6116,7 @@ app.post("/api/agent/sessions/:sessionId/actions/:actionId/approve", async (req,
     return sendError(res, 409, `action is already ${action.status}`);
   }
 
-  const actorEmail = getRequestActorEmail(req);
+  const actorEmail = getRequestActorPrincipal(req)?.username ?? null;
   let updatedAction;
   let assistantContent = "";
   try {
@@ -6177,7 +6185,7 @@ app.post("/api/agent/sessions/:sessionId/actions/:actionId/reject", async (req, 
     return sendError(res, 409, `action is already ${action.status}`);
   }
 
-  const actorEmail = getRequestActorEmail(req);
+  const actorEmail = getRequestActorPrincipal(req)?.username ?? null;
   const updatedAction = await prisma.agentAction.update({
     where: { id: action.id },
     data: {
@@ -7622,12 +7630,12 @@ server.on("upgrade", (request, socket, head) => {
     socket.destroy();
     return;
   }
-  if (authConfig.enabled) {
-    const cookies = parseCookieHeader(request.headers.cookie);
-    const session = readSessionToken(authConfig, cookies[FACTORY_AUTH_SESSION_COOKIE_NAME]);
-    if (!session) {
+  if (isAuthEnabled(authConfig)) {
+    const principal = authenticateRequest(request.headers.authorization);
+    if (!principal) {
+      const header = buildWwwAuthenticateHeader(authConfig);
       socket.write(
-        "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":\"authentication required\"}"
+        `HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nWWW-Authenticate: ${header}\r\nConnection: close\r\n\r\n{"error":"authentication required"}`
       );
       socket.destroy();
       return;

@@ -11,6 +11,9 @@
     "noEmit": true,
     "types": ["vite/client"],
     "paths": {
+      "@attractor/shared-auth": [
+        "../../packages/shared-auth/src/index.ts"
+      ],
       "@attractor/dot-engine": [
         "../../packages/dot-engine/src/index.ts"
       ]

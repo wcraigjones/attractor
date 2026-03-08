@@ -4,7 +4,8 @@ import { fileURLToPath, URL } from "node:url";
 export default defineConfig({
   resolve: {
     alias: {
-      "@attractor/dot-engine": fileURLToPath(new URL("./packages/dot-engine/src/index.ts", import.meta.url))
+      "@attractor/dot-engine": fileURLToPath(new URL("./packages/dot-engine/src/index.ts", import.meta.url)),
+      "@attractor/shared-auth": fileURLToPath(new URL("./packages/shared-auth/src/index.ts", import.meta.url))
     }
   },
   test: {

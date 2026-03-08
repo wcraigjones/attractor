@@ -14,6 +14,9 @@
       "@attractor/dot-engine": [
         "../../packages/dot-engine/src/index.ts"
       ],
+      "@attractor/shared-auth": [
+        "../../packages/shared-auth/src/index.ts"
+      ],
       "@attractor/shared-types": [
         "../../packages/shared-types/src/index.ts"
       ],

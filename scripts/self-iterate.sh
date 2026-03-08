@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/api-auth.sh
+source "$SCRIPT_DIR/lib/api-auth.sh"
+
 API_BASE_URL="${API_BASE_URL:-http://localhost:8080}"
 PROJECT_ID="${PROJECT_ID:-}"
 ATTRACTOR_ID="${ATTRACTOR_ID:-}"
@@ -21,7 +25,7 @@ payload=$(cat <<JSON
 JSON
 )
 
-response=$(curl -sS -X POST "$API_BASE_URL/api/projects/$PROJECT_ID/self-iterate" \
+response=$(curl -sS "${API_AUTH_CURL_ARGS[@]}" -X POST "$API_BASE_URL/api/projects/$PROJECT_ID/self-iterate" \
   -H 'content-type: application/json' \
   -d "$payload")
 

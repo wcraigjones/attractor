@@ -7,15 +7,9 @@
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
-    "outDir": "dist/server",
-    "skipLibCheck": true,
-    "baseUrl": ".",
-    "paths": {
-      "@attractor/shared-auth": [
-        "../../packages/shared-auth/src/index.ts"
-      ]
-    }
+    "outDir": "dist",
+    "skipLibCheck": true
   },
-  "include": ["src/server/**/*.ts"],
+  "include": ["src/**/*.ts"],
   "exclude": ["dist", "node_modules"]
 }

@@ -1,3 +1,22 @@
+{{- $authSecretName := "" -}}
+{{- if .Values.auth.basic.existingSecretName -}}
+{{- $authSecretName = .Values.auth.basic.existingSecretName -}}
+{{- else if .Values.auth.basic.passwordHash -}}
+{{- $authSecretName = "factory-auth" -}}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $authSecretName }}
+  namespace: {{ include "factory.namespace" . }}
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  FACTORY_AUTH_BASIC_PASSWORD_HASH: {{ .Values.auth.basic.passwordHash | quote }}
+  FACTORY_AUTH_BASIC_USERNAME: {{ .Values.auth.basic.username | quote }}
+  FACTORY_AUTH_BASIC_REALM: {{ .Values.auth.basic.realm | quote }}
+---
+{{- end }}
 apiVersion: v1
 kind: Secret
 metadata:
@@ -391,14 +410,23 @@ spec:
               value: {{ .Values.taskTemplateScheduler.intervalSeconds | quote }}
             - name: TASK_TEMPLATE_SCHEDULER_BATCH_SIZE
               value: {{ .Values.taskTemplateScheduler.batchSize | quote }}
-            - name: FACTORY_AUTH_GOOGLE_CLIENT_ID
-              value: {{ .Values.auth.googleClientId | quote }}
-            - name: FACTORY_AUTH_GOOGLE_CLIENT_SECRET
-              value: {{ .Values.auth.googleClientSecret | quote }}
-            - name: FACTORY_AUTH_ALLOWED_DOMAIN
-              value: {{ .Values.auth.allowedDomain | quote }}
-            - name: FACTORY_AUTH_SESSION_SECRET
-              value: {{ .Values.auth.sessionSecret | quote }}
+            {{- if $authSecretName }}
+            - name: FACTORY_AUTH_BASIC_PASSWORD_HASH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $authSecretName }}
+                  key: FACTORY_AUTH_BASIC_PASSWORD_HASH
+            - name: FACTORY_AUTH_BASIC_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $authSecretName }}
+                  key: FACTORY_AUTH_BASIC_USERNAME
+            - name: FACTORY_AUTH_BASIC_REALM
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $authSecretName }}
+                  key: FACTORY_AUTH_BASIC_REALM
+            {{- end }}
             - name: MINIO_BUCKET
               value: {{ .Values.minio.bucket | quote }}
             - name: MINIO_ACCESS_KEY
@@ -468,14 +496,23 @@ spec:
               value: {{ default "" .Values.global.factoryVersion | quote }}
             - name: API_BASE_URL
               value: {{ .Values.web.apiBaseUrl | quote }}
-            - name: FACTORY_AUTH_GOOGLE_CLIENT_ID
-              value: {{ .Values.auth.googleClientId | quote }}
-            - name: FACTORY_AUTH_GOOGLE_CLIENT_SECRET
-              value: {{ .Values.auth.googleClientSecret | quote }}
-            - name: FACTORY_AUTH_ALLOWED_DOMAIN
-              value: {{ .Values.auth.allowedDomain | quote }}
-            - name: FACTORY_AUTH_SESSION_SECRET
-              value: {{ .Values.auth.sessionSecret | quote }}
+            {{- if $authSecretName }}
+            - name: FACTORY_AUTH_BASIC_PASSWORD_HASH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $authSecretName }}
+                  key: FACTORY_AUTH_BASIC_PASSWORD_HASH
+            - name: FACTORY_AUTH_BASIC_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $authSecretName }}
+                  key: FACTORY_AUTH_BASIC_USERNAME
+            - name: FACTORY_AUTH_BASIC_REALM
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $authSecretName }}
+                  key: FACTORY_AUTH_BASIC_REALM
+            {{- end }}
           resources:
             {{- toYaml .Values.resources.web | nindent 12 }}
 ---

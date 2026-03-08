@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/api-auth.sh
+source "$SCRIPT_DIR/lib/api-auth.sh"
+
 API_BASE_URL="${API_BASE_URL:-http://localhost:8080}"
 ATTRACTOR_NAME="${ATTRACTOR_NAME:-pr-review-attractor}"
 ATTRACTOR_PATH="${ATTRACTOR_PATH:-factory/pr-review-attractor.dot}"
@@ -37,7 +41,7 @@ payload=$(
   '
 )
 
-response=$(curl -sS -X POST "$API_BASE_URL/api/attractors/global" \
+response=$(curl -sS "${API_AUTH_CURL_ARGS[@]}" -X POST "$API_BASE_URL/api/attractors/global" \
   -H 'content-type: application/json' \
   -d "$payload")
 

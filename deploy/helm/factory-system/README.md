@@ -19,6 +19,7 @@ deploy/helm/factory-system
 
 - `ingress.annotations`: pass ALB annotations (scheme, cert ARN, redirect, health checks)
 - `service.api.annotations`, `service.web.annotations`: per-service annotations
+- `auth.basic.username`, `auth.basic.passwordHash`, `auth.basic.realm`, `auth.basic.existingSecretName`
 - `images.runner.digest`: optional runner image digest (`sha256:...`) for `RUNNER_IMAGE` defaults
 - `postgres.storageClassName`, `redis.storageClassName`, `minio.storageClassName`
 - `hpa.api.*`, `hpa.web.*`: optional autoscaling controls
